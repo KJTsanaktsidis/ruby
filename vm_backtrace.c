@@ -123,7 +123,7 @@ typedef struct rb_backtrace_location_struct {
 
     const rb_iseq_t *iseq;
     const VALUE *pc;
-    ID mid;
+    const rb_callable_method_entry_t *cme;
 } rb_backtrace_location_t;
 
 struct valued_frame_info {
@@ -220,7 +220,7 @@ location_label(rb_backtrace_location_t *loc)
       case LOCATION_TYPE_ISEQ:
         return ISEQ_BODY(loc->iseq)->location.label;
       case LOCATION_TYPE_CFUNC:
-        return rb_id2str(loc->mid);
+        return rb_id2str(loc->cme->def->original_id);
       default:
         rb_bug("location_label: unreachable");
         UNREACHABLE;
@@ -267,7 +267,7 @@ location_base_label(rb_backtrace_location_t *loc)
       case LOCATION_TYPE_ISEQ:
         return ISEQ_BODY(loc->iseq)->location.base_label;
       case LOCATION_TYPE_CFUNC:
-        return rb_id2str(loc->mid);
+        return rb_id2str(loc->cme->def->original_id);
       default:
         rb_bug("location_base_label: unreachable");
         UNREACHABLE;
@@ -283,6 +283,96 @@ static VALUE
 location_base_label_m(VALUE self)
 {
     return location_base_label(location_ptr(self));
+}
+
+static VALUE
+pretty_name_classpath(VALUE klass)
+{
+    if (klass && !NIL_P(klass)) {
+        if (RB_TYPE_P(klass, T_ICLASS)) {
+            klass = RBASIC(klass)->klass;
+        }
+        else if (FL_TEST(klass, FL_SINGLETON)) {
+            klass = rb_ivar_get(klass, id__attached__);
+            if (!RB_TYPE_P(klass, T_CLASS) && !RB_TYPE_P(klass, T_MODULE))
+                return rb_sprintf("#<%s:%p>", rb_class2name(rb_obj_class(klass)), (void*)klass);
+        }
+        return rb_class_path(klass);
+    }
+    else {
+        return Qnil;
+    }
+}
+
+static VALUE
+frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
+{
+    VALUE method_name = Qnil;
+    VALUE defined_class = Qnil;
+    if (cme) {
+        method_name = rb_id2str(cme->def->original_id);
+        defined_class = cme->defined_class;
+    } else if (iseq) {
+        method_name = ISEQ_BODY(iseq)->location.label;
+    } else {
+        return rb_str_new_literal("unknown frame");
+    }
+
+    if (defined_class != Qnil) {
+        VALUE classpath = pretty_name_classpath(defined_class);
+        bool singleton_p = RB_TEST(defined_class) && FL_TEST(defined_class, FL_SINGLETON);
+        return rb_sprintf("%"PRIsVALUE"%s%"PRIsVALUE,
+                          classpath, singleton_p ? "." : "#", method_name);
+    }
+    else {
+        return method_name;
+    }
+}
+
+static VALUE
+location_pretty_name(rb_backtrace_location_t *loc)
+{
+  return frame_pretty_name(loc->cme, loc->iseq);
+}
+
+/*
+ * Returns the pretty name for this frame.
+ *
+ * This augments the normal label output with information about classes
+ * on which methods are defined; this is helpful to understand backtraces
+ * without needing to refer back to the source code.
+ *
+ * Consider the following example program:
+ * module AModule
+ *   class AClass
+ *     def self.a_singleton_method
+ *       AClass.new.an_instance_method
+ *     end
+ *
+ *     def an_instance_method
+ *       NestedClass.new.another_method
+ *     end
+ *
+ *     class NestedClass
+ *       def another_method
+ *         puts caller_locations(0).map(&:pretty_name).join("\n")
+ *       end
+ *     end
+ *   end
+ * end
+ * AModule::AClass.a_singleton_method
+ *
+ * The output of this program is:
+ *
+ *   AModule::AClass::NestedClass#another_method
+ *   AModule::AClass#an_instance_method
+ *   AModule::AClass.a_singleton_method
+ *   <main>
+ */
+static VALUE
+location_pretty_name_m(VALUE self)
+{
+  return location_pretty_name(location_ptr(self));
 }
 
 static const rb_iseq_t *
@@ -422,7 +512,7 @@ location_to_str(rb_backtrace_location_t *loc)
             file = GET_VM()->progname;
             lineno = 0;
         }
-        name = rb_id2str(loc->mid);
+        name = rb_id2str(loc->cme->def->original_id);
         break;
       default:
         rb_bug("location_to_str: unreachable");
@@ -641,6 +731,7 @@ rb_ec_partial_backtrace_object(const rb_execution_context_t *ec, long start_fram
                     loc = &bt->backtrace[bt->backtrace_size++];
                     loc->type = LOCATION_TYPE_ISEQ;
                     loc->iseq = iseq;
+                    loc->cme = rb_vm_frame_method_entry(cfp);
                     loc->pc = pc;
                     bt_update_cfunc_loc(cfunc_counter, loc-1, iseq, pc);
                     if (do_yield) {
@@ -660,7 +751,7 @@ rb_ec_partial_backtrace_object(const rb_execution_context_t *ec, long start_fram
                 loc->type = LOCATION_TYPE_CFUNC;
                 loc->iseq = NULL;
                 loc->pc = NULL;
-                loc->mid = rb_vm_frame_method_entry(cfp)->def->original_id;
+                loc->cme = rb_vm_frame_method_entry(cfp);
                 cfunc_counter++;
             }
         }
@@ -1344,6 +1435,7 @@ Init_vm_backtrace(void)
     rb_define_method(rb_cBacktraceLocation, "lineno", location_lineno_m, 0);
     rb_define_method(rb_cBacktraceLocation, "label", location_label_m, 0);
     rb_define_method(rb_cBacktraceLocation, "base_label", location_base_label_m, 0);
+    rb_define_method(rb_cBacktraceLocation, "pretty_name", location_pretty_name_m, 0);
     rb_define_method(rb_cBacktraceLocation, "path", location_path_m, 0);
     rb_define_method(rb_cBacktraceLocation, "absolute_path", location_absolute_path_m, 0);
     rb_define_method(rb_cBacktraceLocation, "to_s", location_to_str_m, 0);
