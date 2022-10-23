@@ -491,10 +491,21 @@ class TestBacktrace < Test::Unit::TestCase
         def o.double_singleton = #{capture_expr}
       end
 
+      class EmptyClass
+      end
+      emptyclass_object_with_singleton_method = EmptyClass.new
+      emptyclass_object_with_singleton_method.singleton_class.define_method(:test_method) do
+        #{capture_expr}
+      end
+
       module IntegerTestRefinement
         refine Integer do
           def refinement_method = #{capture_expr}
           def refinement_method_with_block = 1.times { #{capture_expr} }
+        end
+
+        refine Integer.singleton_class do
+          def refinement_singleton = #{capture_expr}
         end
       end
       using IntegerTestRefinement
@@ -506,6 +517,7 @@ class TestBacktrace < Test::Unit::TestCase
       end
       anonymous_subclass = Class.new(SimpleSuperclass) do
         def test_method = #{capture_expr}
+        def self.singleton_test_method = #{capture_expr}
       end
 
       module IncludedModule
@@ -665,7 +677,13 @@ class TestBacktrace < Test::Unit::TestCase
 
   def test_pretty_singleton_object
     program = build_bt_prog("object_with_singleton_method.test_method")
-    expected = [%r{\#<Object:0x[0-9a-f]+>\.test_method\n}]
+    expected = ["<instance of Object>#test_method"]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_singleton_object_with_class
+    program = build_bt_prog("emptyclass_object_with_singleton_method.test_method")
+    expected = ["<instance of EmptyClass>#test_method"]
     assert_in_out_err([], program, expected, [])
   end
 
@@ -678,8 +696,8 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_refinement_method
     program = build_bt_prog("0.refinement_method", frame_count: 2)
     expected = [
-      /\#<Refinement:0x[0-9a-f]+>\#refinement_method\n/,
-      /<main>\n/,
+      "<refinement IntegerTestRefinement of Integer>#refinement_method",
+      "<main>",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -687,29 +705,44 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_block_in_refinement_method
     program = build_bt_prog("0.refinement_method_with_block", frame_count: 4)
     expected = [
-      /\#<Refinement:0x[0-9a-f]+>\#refinement_method_with_block\n/,
-      /Integer\#times\n/,
-      /\#<Refinement:0x[0-9a-f]+>\#refinement_method_with_block\n/,
-      /<main>\n/,
+      "<refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
+      "Integer#times",
+      "<refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
+      "<main>",
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_refinement_singleton_method
+    program = build_bt_prog("Integer.refinement_singleton", frame_count: 2)
+    expected = [
+      "<refinement IntegerTestRefinement of <singleton of Integer>>#refinement_singleton",
+      "<main>",
     ]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_singleton_defined_on_singleton
     program = build_bt_prog("object_with_singleton_method.singleton_class.double_singleton")
-    expected = [%r{\#<Class:0x[0-9a-f]+>\.double_singleton\n}]
+    expected = ["<instance of Object>.double_singleton"]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_anonymous_class
     program = build_bt_prog("anonymous_class.new.test_method")
-    expected = [%r{\#<Class:0x[0-9a-f]+>\#test_method\n}]
+    expected = ["<anonymous subclass of Object>#test_method"]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_anonymous_subclass
     program = build_bt_prog("anonymous_subclass.new.test_method")
-    expected = [%r{\#<Class:0x[0-9a-f]+>\#test_method\n}]
+    expected = ["<anonymous subclass of SimpleSuperclass>#test_method"]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_anonymous_subclass_singleton
+    program = build_bt_prog("anonymous_subclass.singleton_test_method")
+    expected = ["<anonymous subclass of SimpleSuperclass>.singleton_test_method"]
     assert_in_out_err([], program, expected, [])
   end
 
