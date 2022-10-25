@@ -368,14 +368,123 @@ pretty_name_classpath(VALUE klass, bool *output_is_singleton)
 }
 
 static VALUE
+parse_mod_name_from_iseq_label(VALUE label, int *class_or_module)
+{
+    if (!RB_TEST(label) || !RB_TYPE_P(label, T_STRING)) {
+        return Qnil;
+    }
+    char *label_cstr = rb_str_to_cstr(label);
+
+    char *ix_open_bracket = strstr(label_cstr, "<");
+    if (!ix_open_bracket) {
+        return Qnil;
+    }
+    char *ix_colon = strstr(ix_open_bracket, ":");
+    if (!ix_colon) {
+        return Qnil;
+    }
+    char *ix_close_bracket = strstr(ix_colon, ">");
+    if (!ix_close_bracket) {
+        return Qnil;
+    }
+
+    size_t len_of_class_or_module = ix_colon - ix_open_bracket - 1;
+    if (len_of_class_or_module == 0) {
+        return Qnil;
+    }
+    if (strncmp(ix_open_bracket + 1, "module", len_of_class_or_module) == 0) {
+        *class_or_module = 0;
+    } else if (strncmp(ix_open_bracket + 1, "class", len_of_class_or_module) == 0) {
+        *class_or_module = 1;
+    } else {
+        return Qnil;
+    }
+
+    size_t len_of_name = ix_close_bracket - ix_colon - 1;
+    if (len_of_name == 0) {
+        return Qnil;
+    }
+    return rb_str_new(ix_colon + 1, len_of_name);
+}
+
+static VALUE
+pretty_name_for_class_iseq(const rb_iseq_t *iseq, int depth)
+{
+    int class_or_module;
+    VALUE label_str = ISEQ_BODY(iseq)->location.label;
+    VALUE class_or_module_name = parse_mod_name_from_iseq_label(label_str, &class_or_module);
+    if (!RB_TEST(class_or_module_name)) {
+        return rb_str_new_literal("");
+    }
+    const rb_iseq_t *parent_iseq = ISEQ_BODY(iseq)->parent_iseq;
+    VALUE parent_namespace = rb_str_new_literal("");
+    if (parent_iseq && parent_iseq->body->type == ISEQ_TYPE_CLASS) {
+        VALUE parent_name = pretty_name_for_class_iseq(parent_iseq, depth + 1);
+        parent_namespace = rb_sprintf("%"PRIsVALUE"::", parent_name);
+    }
+    const char *prefix = "";
+    if (depth == 0) {
+        if (class_or_module == 0) {
+            prefix = "module exec in ";
+        } else if (class_or_module == 1) {
+            prefix = "class exec in ";
+        }
+    }
+    return rb_sprintf("%s%"PRIsVALUE"%"PRIsVALUE, prefix, parent_namespace, class_or_module_name);
+}
+
+static VALUE
 frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
 {
     if (!cme && !iseq) {
         return rb_str_new_literal("(unknown frame)");
     }
     if (!cme && iseq) {
-        // without a callable_method_entry, the best we can print is whatever
-        // is in the iseq label.
+        // We are not in a method call.
+        // There are a few options, depending on iseq type.
+        const rb_iseq_t *parent_iseq = ISEQ_BODY(iseq)->parent_iseq;
+        switch (ISEQ_BODY(iseq)->type) {
+          case ISEQ_TYPE_MAIN:
+            return rb_str_new_literal("(main)");
+          case ISEQ_TYPE_TOP:
+            return rb_str_new_literal("(top)");
+          case ISEQ_TYPE_BLOCK:
+            if (!cme && parent_iseq) {
+                return rb_sprintf("block in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
+            }
+            break;
+          case ISEQ_TYPE_EVAL:
+            if (!cme && parent_iseq) {
+                return rb_sprintf("eval in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
+            }
+            break;
+          case ISEQ_TYPE_RESCUE:
+            if (!cme && parent_iseq) {
+                return rb_sprintf("rescue in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
+            }
+            break;
+          case ISEQ_TYPE_ENSURE:
+            if (!cme && parent_iseq) {
+              return rb_sprintf("ensure in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
+            }
+            break;
+          case ISEQ_TYPE_CLASS: {
+            // There is actually not enough information here, _really_, to print this properly. We want
+            // to print something like "module_exec in MyModule" or "class_exec in MyClass", but we
+            // don't know the name of the class/module or even whether it's a class or a module.
+            // Until we fix that during iseq construction, we can be evil and parse it out of the
+            // label, which looks like "<module:FooModule>" or "<module:BarModule>"
+            VALUE ret = pretty_name_for_class_iseq(iseq, 0);
+            if (!RB_TEST(ret) || rb_str_length(ret) == 0) {
+                break;
+            }
+            return ret;
+          }
+          default:
+            break;
+        }
+    }
+    if (!cme && iseq) {
         return ISEQ_BODY(iseq)->location.label;
     }
     VALUE method_name = rb_id2str(cme->def->original_id);
@@ -400,6 +509,12 @@ frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
               break;
           case ISEQ_TYPE_EVAL:
               prefix = "eval in ";
+              break;
+          case ISEQ_TYPE_RESCUE:
+              prefix = "rescue in ";
+              break;
+          case ISEQ_TYPE_ENSURE:
+              prefix = "ensure in ";
               break;
           default:
               prefix = "";

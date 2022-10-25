@@ -447,6 +447,30 @@ class TestBacktrace < Test::Unit::TestCase
           1.times { #{capture_expr} }
         end
 
+        def ex_begin
+          begin
+            #{capture_expr}
+          end
+        end
+
+        def ex_rescue
+          begin
+            raise "an exception"
+          rescue
+            #{capture_expr}
+          end
+        end
+
+        def ex_ensure
+          begin
+            raise "an exception"
+          rescue
+            nil
+          ensure
+            #{capture_expr}
+          end
+        end
+
         class << self
           def ex_singleton = #{capture_expr}
           define_method(:ex_singleton_bmethod) { #{capture_expr} }
@@ -598,7 +622,7 @@ class TestBacktrace < Test::Unit::TestCase
 
   def test_pretty_main
     program = build_bt_prog(nil)
-    expected = ["<main>"]
+    expected = ["(main)"]
     assert_in_out_err([], program, expected, [])
   end
 
@@ -634,7 +658,7 @@ class TestBacktrace < Test::Unit::TestCase
     expected = [
       "block in TracepointTests.setup_tracepoint",
       "TracepointTests.define_method_inside_tp",
-      "<main>"
+      "(main)"
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -643,7 +667,19 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("module DynModule; SimpleExampleClass.ex_singleton; end;", frame_count: 2)
     expected = [
       "SimpleExampleClass.ex_singleton",
-      "<module:DynModule>",
+      "module exec in DynModule",
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_inside_class_definition
+    program = build_bt_prog(
+      "module Nest; class DynClass; SimpleExampleClass.ex_singleton; end; end;",
+      frame_count: 2
+    )
+    expected = [
+      "SimpleExampleClass.ex_singleton",
+      "class exec in Nest::DynClass",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -653,7 +689,7 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("Module.new { SimpleExampleClass.ex_singleton }", frame_count: 2)
     expected = [
       "SimpleExampleClass.ex_singleton",
-      "block in <main>",
+      "block in (main)",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -663,7 +699,7 @@ class TestBacktrace < Test::Unit::TestCase
     expected = [
       "ModuleWithExtendedHook.extended",
       "Kernel#extend",
-      "<module:DynModule>",
+      "module exec in DynModule",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -672,7 +708,7 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("Proc.new { SimpleExampleClass.ex_singleton }.call", frame_count: 2)
     expected = [
       "SimpleExampleClass.ex_singleton",
-      "block in <main>",
+      "block in (main)",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -699,7 +735,7 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("0.refinement_method", frame_count: 2)
     expected = [
       "<refinement IntegerTestRefinement of Integer>#refinement_method",
-      "<main>",
+      "(main)",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -710,7 +746,7 @@ class TestBacktrace < Test::Unit::TestCase
       "block in <refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
       "Integer#times",
       "<refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
-      "<main>",
+      "(main)",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -719,7 +755,7 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("Integer.refinement_singleton", frame_count: 2)
     expected = [
       "<refinement IntegerTestRefinement of <singleton of Integer>>#refinement_singleton",
-      "<main>",
+      "(main)",
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -762,8 +798,76 @@ class TestBacktrace < Test::Unit::TestCase
     expected = [
       "Thread#backtrace_locations",
       "Kernel#lambda",
-      "<main>"
+      "(main)"
     ]
     assert_in_out_err(["-I./.ext/#{RUBY_PLATFORM}/", "-r-test-/backtrace"], program, expected, [])
+  end
+
+  def test_pretty_begin
+    program = build_bt_prog("SimpleExampleClass.new.ex_begin")
+    expected = ["SimpleExampleClass#ex_begin"]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_rescue
+    program = build_bt_prog("SimpleExampleClass.new.ex_rescue")
+    expected = ["rescue in SimpleExampleClass#ex_rescue"]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_ensure
+    pend "This doesn't work; I can't actually seem to make an ISEQ_TYPE_ENSURE appear inside a method"
+    program = build_bt_prog("SimpleExampleClass.new.ex_ensure")
+    expected = ["ensure in SimpleExampleClass#ex_ensure"]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_toplevel_rescue
+    program = build_bt_prog(
+      "begin; raise 'hi'; rescue; SimpleExampleClass.ex_singleton; end;",
+      frame_count: 2
+    )
+    expected = [
+      "SimpleExampleClass.ex_singleton",
+      "rescue in (main)"
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_toplevel_ensure
+    program = build_bt_prog(
+      "begin; $do = :nothing; ensure; SimpleExampleClass.ex_singleton; end;",
+      frame_count: 2
+    )
+    expected = [
+      "SimpleExampleClass.ex_singleton",
+      "(main)"
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_toplevel_eval
+    program = build_bt_prog("eval \"SimpleExampleClass.ex_singleton\"", frame_count: 4);
+    expected = [
+      "SimpleExampleClass.ex_singleton",
+      "eval in (main)",
+      "Kernel#eval",
+      "(main)"
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_toplevel_nested_eval
+    string = "SimpleExampleClass.ex_singleton"
+    program = build_bt_prog("eval #{"eval #{string.inspect}".inspect}", frame_count: 6);
+    expected = [
+      "SimpleExampleClass.ex_singleton",
+      "eval in eval in (main)",
+      "Kernel#eval",
+      "eval in (main)",
+      "Kernel#eval",
+      "(main)"
+    ]
+    assert_in_out_err([], program, expected, [])
   end
 end
