@@ -436,7 +436,7 @@ class TestBacktrace < Test::Unit::TestCase
     <<~RUBY
       class SimpleExampleClass
         def ex_instance = #{capture_expr}
-        def call_block_from_c = 1.times { #{capture_expr} }       
+        def call_block_from_c = 1.times { #{capture_expr} }
         def yield_nothing = yield
         def call_block_from_ruby = yield_nothing { #{capture_expr} }
         def instance_eval_string_from_ruby = instance_eval "ex_instance"
@@ -474,9 +474,7 @@ class TestBacktrace < Test::Unit::TestCase
         end
         def self.define_method_inside_tp
           setup_tracepoint
-          1.times do
-            define_method(:some_random_method) {}
-          end
+          define_method(:some_random_method) {}
         end
       end
 
@@ -560,7 +558,7 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_block_from_ruby
     program = build_bt_prog("SimpleExampleClass.new.call_block_from_ruby", frame_count: 3)
     expected = [
-      "SimpleExampleClass#call_block_from_ruby",
+      "block in SimpleExampleClass#call_block_from_ruby",
       "SimpleExampleClass#yield_nothing",
       "SimpleExampleClass#call_block_from_ruby",
     ]
@@ -570,7 +568,7 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_block_from_c
     program = build_bt_prog("SimpleExampleClass.new.call_block_from_c", frame_count: 3)
     expected = [
-      "SimpleExampleClass#call_block_from_c",
+      "block in SimpleExampleClass#call_block_from_c",
       "Integer#times",
       "SimpleExampleClass#call_block_from_c",
     ]
@@ -581,7 +579,7 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("SimpleExampleClass.new.instance_eval_string_from_ruby", frame_count: 4)
     expected = [
       "SimpleExampleClass#ex_instance",
-      "SimpleExampleClass#instance_eval_string_from_ruby",
+      "eval in SimpleExampleClass#instance_eval_string_from_ruby",
       "BasicObject#instance_eval",
       "SimpleExampleClass#instance_eval_string_from_ruby",
     ]
@@ -591,7 +589,7 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_eval
     program = build_bt_prog("SimpleExampleClass.new.eval_string_from_ruby", frame_count: 3)
     expected = [
-      "SimpleExampleClass#eval_string_from_ruby",
+      "eval in SimpleExampleClass#eval_string_from_ruby",
       "Kernel#eval",
       "SimpleExampleClass#eval_string_from_ruby",
     ]
@@ -606,33 +604,37 @@ class TestBacktrace < Test::Unit::TestCase
 
   def test_pretty_bmethod
     program = build_bt_prog("SimpleExampleClass.new.ex_bmethod")
-    expected = ["SimpleExampleClass#ex_bmethod"]
+    # n.b. - _all_ bmethods are actually blocks; the iseq never sheds it's blockiness
+    # when it's passed to define_method.
+    expected = ["block in SimpleExampleClass#ex_bmethod"]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_block_in_bmethod
     program = build_bt_prog("SimpleExampleClass.new.call_block_from_bmethod", frame_count: 3)
+    # Because of the above comment in test_pretty_bmethod, there's actually no way
+    # to differentiate a bmethod from a block inside a bmethod; both will have identical
+    # output.
     expected = [
-      "SimpleExampleClass#call_block_from_bmethod",
+      "block in SimpleExampleClass#call_block_from_bmethod",
       "Integer#times",
-      "SimpleExampleClass#call_block_from_bmethod",
+      "block in SimpleExampleClass#call_block_from_bmethod",
     ]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_singleton_bmethod
     program = build_bt_prog("SimpleExampleClass.ex_singleton_bmethod")
-    expected = ["SimpleExampleClass.ex_singleton_bmethod"]
+    expected = ["block in SimpleExampleClass.ex_singleton_bmethod"]
     assert_in_out_err([], program, expected, [])
   end
 
   def test_pretty_defining_method_inside_tracepoint
-    program = build_bt_prog("TracepointTests.define_method_inside_tp", frame_count: 4)
+    program = build_bt_prog("TracepointTests.define_method_inside_tp", frame_count: 3)
     expected = [
-      "TracepointTests.setup_tracepoint",
+      "block in TracepointTests.setup_tracepoint",
       "TracepointTests.define_method_inside_tp",
-      "Integer#times",
-      "TracepointTests.define_method_inside_tp"
+      "<main>"
     ]
     assert_in_out_err([], program, expected, [])
   end
@@ -683,7 +685,7 @@ class TestBacktrace < Test::Unit::TestCase
 
   def test_pretty_singleton_object_with_class
     program = build_bt_prog("emptyclass_object_with_singleton_method.test_method")
-    expected = ["<instance of EmptyClass>#test_method"]
+    expected = ["block in <instance of EmptyClass>#test_method"]
     assert_in_out_err([], program, expected, [])
   end
 
@@ -705,7 +707,7 @@ class TestBacktrace < Test::Unit::TestCase
   def test_pretty_block_in_refinement_method
     program = build_bt_prog("0.refinement_method_with_block", frame_count: 4)
     expected = [
-      "<refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
+      "block in <refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
       "Integer#times",
       "<refinement IntegerTestRefinement of Integer>#refinement_method_with_block",
       "<main>",

@@ -373,7 +373,7 @@ frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
     if (!cme && !iseq) {
         return rb_str_new_literal("(unknown frame)");
     }
-    if (!cme) {
+    if (!cme && iseq) {
         // without a callable_method_entry, the best we can print is whatever
         // is in the iseq label.
         return ISEQ_BODY(iseq)->location.label;
@@ -391,13 +391,37 @@ frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
     if (classpath_is_singleton) {
         separator = ".";
     }
-    return rb_sprintf("%"PRIsVALUE"%s%"PRIsVALUE, classpath_str, separator, method_name);
+
+    const char *prefix = "";
+    if (iseq) {
+        switch (ISEQ_BODY(iseq)->type) {
+          case ISEQ_TYPE_BLOCK:
+              prefix = "block in ";
+              break;
+          case ISEQ_TYPE_EVAL:
+              prefix = "eval in ";
+              break;
+          default:
+              prefix = "";
+              break;
+        }
+    }
+    return rb_sprintf("%s%"PRIsVALUE"%s%"PRIsVALUE,
+                      prefix, classpath_str, separator, method_name);
 }
 
 static VALUE
 location_pretty_name(rb_backtrace_location_t *loc)
 {
-  return frame_pretty_name(loc->cme, loc->iseq);
+  // do _NOT_ actually pass the iseq to frame_pretty_name if this loc->type is not
+  // a LOCATION_TYPE_ISEQ; otherwise, if loc is a cfunc frame, the iseq actually belongs
+  // to the frame _underneath_ this one. That leads to silly output like
+  // "block in Integer#times" when the caller of Integer#times is _itself_ in a block.
+  const rb_iseq_t *iseq = NULL;
+  if (loc->type == LOCATION_TYPE_ISEQ) {
+      iseq = loc->iseq;
+  }
+  return frame_pretty_name(loc->cme, iseq);
 }
 
 /*
