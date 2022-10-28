@@ -81,8 +81,8 @@ describe "Thread#report_on_exception=" do
           Thread.pass while t.alive?
         }.should output("", <<ERR)
 #{t.inspect} terminated with exception (report_on_exception is true):
-#{__FILE__}:#{line_raise}:in `foo': Thread#report_on_exception specs backtrace order (RuntimeError)
-\tfrom #{__FILE__}:#{line_call_foo}:in `block (5 levels) in <top (required)>'
+#{__FILE__}:#{line_raise}:in `<instance of MSpecEnv>#foo': Thread#report_on_exception specs backtrace order (RuntimeError)
+\tfrom #{__FILE__}:#{line_call_foo}:in `block (5 levels) in (top)'
 ERR
 
         -> {

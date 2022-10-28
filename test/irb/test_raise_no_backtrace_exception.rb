@@ -41,7 +41,7 @@ IRB
         env = {}
         %w(LC_MESSAGES LC_ALL LC_CTYPE LANG).each {|n| env[n] = "ja_JP.UTF-8" }
         args = [env] + bundle_exec + %W[-rirb -C #{tmpdir} -W0 -e IRB.start(__FILE__) -- -f --]
-        error = /`raise_euc_with_invalid_byte_sequence': あ\\xFF \(RuntimeError\)/
+        error = /`Object#raise_euc_with_invalid_byte_sequence': あ\\xFF \(RuntimeError\)/
         assert_in_out_err(args, <<~IRB, error, [], encoding: "UTF-8")
           require_relative 'euc'
           raise_euc_with_invalid_byte_sequence

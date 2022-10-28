@@ -732,10 +732,10 @@ location_to_str(rb_backtrace_location_t *loc)
     VALUE file, name;
     int lineno;
 
+    name = location_pretty_name(loc);
     switch (loc->type) {
       case LOCATION_TYPE_ISEQ:
         file = rb_iseq_path(loc->iseq);
-        name = ISEQ_BODY(loc->iseq)->location.label;
 
         lineno = calc_lineno(loc->iseq, loc->pc);
         break;
@@ -748,7 +748,6 @@ location_to_str(rb_backtrace_location_t *loc)
             file = GET_VM()->progname;
             lineno = 0;
         }
-        name = rb_id2str(loc->cme->def->original_id);
         break;
       default:
         rb_bug("location_to_str: unreachable");

@@ -1163,8 +1163,8 @@ class TestMJIT < Test::Unit::TestCase
       puts a
     end;
     lines = out.lines
-    assert_equal("-e:8:in `a'\n", lines[0])
-    assert_equal("-e:8:in `a'\n", lines[1])
+    assert_equal("-e:8:in `Object#a'\n", lines[0])
+    assert_equal("-e:8:in `Object#a'\n", lines[1])
   end
 
   def test_fork_with_mjit_worker_thread

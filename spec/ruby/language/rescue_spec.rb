@@ -191,7 +191,7 @@ describe "The rescue keyword" do
       rescue ArgumentError
       end
     rescue StandardError => e
-      e.backtrace.first.should include ":in `raise_standard_error'"
+      e.backtrace.first.should include ":in `RescueSpecs.raise_standard_error'"
     else
       fail("exception wasn't handled by the correct rescue block")
     end

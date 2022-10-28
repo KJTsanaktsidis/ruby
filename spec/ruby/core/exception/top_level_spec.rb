@@ -2,7 +2,7 @@ require_relative '../../spec_helper'
 
 describe "An Exception reaching the top level" do
   it "is printed on STDERR" do
-    ruby_exe('raise "foo"', args: "2>&1", exit_status: 1).should.include?("in `<main>': foo (RuntimeError)")
+    ruby_exe('raise "foo"', args: "2>&1", exit_status: 1).should.include?("in `(main)': foo (RuntimeError)")
   end
 
   it "the Exception#cause is printed to STDERR with backtraces" do
@@ -22,10 +22,10 @@ describe "An Exception reaching the top level" do
     lines = ruby_exe(code, args: "2>&1", exit_status: 1).lines
     lines.reject! { |l| l.include?('rescue in') }
     lines.map! { |l| l.chomp[/:(in.+)/, 1] }
-    lines.should == ["in `raise_wrapped': wrapped (RuntimeError)",
-                     "in `<main>'",
-                     "in `raise_cause': the cause (RuntimeError)",
-                     "in `<main>'"]
+    lines.should == ["in `Object#raise_wrapped': wrapped (RuntimeError)",
+                     "in `(main)'",
+                     "in `Object#raise_cause': the cause (RuntimeError)",
+                     "in `(main)'"]
   end
 
   describe "with a custom backtrace" do

@@ -39,8 +39,8 @@ describe 'Kernel#caller' do
     path = fixture(__FILE__, "caller_at_exit.rb")
     lines = ruby_exe(path).lines
     lines.should == [
-      "#{path}:6:in `foo'\n",
-      "#{path}:2:in `block in <main>'\n"
+      "#{path}:6:in `Object#foo'\n",
+      "#{path}:2:in `block in (main)'\n"
     ]
   end
 
@@ -63,7 +63,7 @@ describe 'Kernel#caller' do
 
       loc = nil
       tap { loc = caller(1, 1)[0] }
-      loc.should.end_with? "in `tap'"
+      loc.should.end_with? "in `Kernel#tap'"
       loc.should.start_with? "<internal:"
     end
   end

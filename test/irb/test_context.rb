@@ -103,7 +103,7 @@ module TestIRB
         irb.eval_input
       end
       assert_empty err
-      assert_pattern_list([:*, /\(irb\):1:in `<main>': Foo \(RuntimeError\)\n/,
+      assert_pattern_list([:*, /\(irb\):1:in `eval \(4 levels\) in \(top\)': Foo \(RuntimeError\)\n/,
                            :*, /#<RuntimeError: Foo>\n/,
                            :*, /0$/,
                            :*, /0$/,
@@ -125,8 +125,8 @@ module TestIRB
       end
       assert_empty err
       assert_pattern_list([
-          :*, /\(irb\):1:in `<main>': Foo \(RuntimeError\)\n/,
-          :*, /\(irb\):2:in `<main>': Bar \(RuntimeError\)\n/,
+          :*, /\(irb\):1:in `eval \(4 levels\) in \(top\)': Foo \(RuntimeError\)\n/,
+          :*, /\(irb\):2:in `eval \(4 levels\) in \(top\)': Bar \(RuntimeError\)\n/,
           :*, /#<RuntimeError: Bar>\n/,
         ], out)
     end
@@ -520,15 +520,15 @@ module TestIRB
       if '2.5.0' <= RUBY_VERSION && RUBY_VERSION < '3.0.0' && STDOUT.tty?
         expected = [
           :*, /Traceback \(most recent call last\):\n/,
-          :*, /\t 2: from \(irb\):1:in `<main>'\n/,
-          :*, /\t 1: from \(irb\):1:in `hoge'\n/,
-          :*, /\(irb\):1:in `fuga': unhandled exception\n/,
+          :*, /\t 2: from \(irb\):1:in `eval \(4 levels\) in \(top\)'/,
+          :*, /\t 1: from \(irb\):1:in `<instance of Object>#hoge'\n/,
+          :*, /\(irb\):1:in `<instance of Object>#fuga': unhandled exception\n/,
         ]
       else
         expected = [
-          :*, /\(irb\):1:in `fuga': unhandled exception\n/,
-          :*, /\tfrom \(irb\):1:in `hoge'\n/,
-          :*, /\tfrom \(irb\):1:in `<main>'\n/,
+          :*, /\(irb\):1:in `<instance of Object>#fuga': unhandled exception\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#hoge'\n/,
+          :*, /\tfrom \(irb\):1:in `eval \(4 levels\) in \(top\)'\n/,
           :*
         ]
       end
@@ -551,15 +551,15 @@ module TestIRB
       if '2.5.0' <= RUBY_VERSION && RUBY_VERSION < '3.0.0' && STDOUT.tty?
         expected = [
           :*, /Traceback \(most recent call last\):\n/,
-          :*, /\t 2: from \(irb\):1:in `<main>'\n/,
-          :*, /\t 1: from \(irb\):1:in `hoge'\n/,
-          :*, /\(irb\):1:in `fuga': A\\xF3B \(RuntimeError\)\n/,
+          :*, /\t 2: from \(irb\):1:in `eval \(4 levels\) in \(top\)'\n/,
+          :*, /\t 1: from \(irb\):1:in `<instance of Object>#hoge'\n/,
+          :*, /\(irb\):1:in `<instance of Object>#fuga': A\\xF3B \(RuntimeError\)\n/,
         ]
       else
         expected = [
-          :*, /\(irb\):1:in `fuga': A\\xF3B \(RuntimeError\)\n/,
-          :*, /\tfrom \(irb\):1:in `hoge'\n/,
-          :*, /\tfrom \(irb\):1:in `<main>'\n/,
+          :*, /\(irb\):1:in `<instance of Object>#fuga': A\\xF3B \(RuntimeError\)\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#hoge'\n/,
+          :*, /\tfrom \(irb\):1:in `eval \(4 levels\) in \(top\)'\n/,
           :*
         ]
       end
@@ -589,43 +589,43 @@ module TestIRB
         expected = [
           :*, /Traceback \(most recent call last\):\n/,
           :*, /\t... \d+ levels...\n/,
-          :*, /\t16: from \(irb\):1:in `a4'\n/,
-          :*, /\t15: from \(irb\):1:in `a5'\n/,
-          :*, /\t14: from \(irb\):1:in `a6'\n/,
-          :*, /\t13: from \(irb\):1:in `a7'\n/,
-          :*, /\t12: from \(irb\):1:in `a8'\n/,
-          :*, /\t11: from \(irb\):1:in `a9'\n/,
-          :*, /\t10: from \(irb\):1:in `a10'\n/,
-          :*, /\t 9: from \(irb\):1:in `a11'\n/,
-          :*, /\t 8: from \(irb\):1:in `a12'\n/,
-          :*, /\t 7: from \(irb\):1:in `a13'\n/,
-          :*, /\t 6: from \(irb\):1:in `a14'\n/,
-          :*, /\t 5: from \(irb\):1:in `a15'\n/,
-          :*, /\t 4: from \(irb\):1:in `a16'\n/,
-          :*, /\t 3: from \(irb\):1:in `a17'\n/,
-          :*, /\t 2: from \(irb\):1:in `a18'\n/,
-          :*, /\t 1: from \(irb\):1:in `a19'\n/,
+          :*, /\t16: from \(irb\):1:in `<instance of Object>#a4'\n/,
+          :*, /\t15: from \(irb\):1:in `<instance of Object>#a5'\n/,
+          :*, /\t14: from \(irb\):1:in `<instance of Object>#a6'\n/,
+          :*, /\t13: from \(irb\):1:in `<instance of Object>#a7'\n/,
+          :*, /\t12: from \(irb\):1:in `<instance of Object>#a8'\n/,
+          :*, /\t11: from \(irb\):1:in `<instance of Object>#a9'\n/,
+          :*, /\t10: from \(irb\):1:in `<instance of Object>#a10'\n/,
+          :*, /\t 9: from \(irb\):1:in `<instance of Object>#a11'\n/,
+          :*, /\t 8: from \(irb\):1:in `<instance of Object>#a12'\n/,
+          :*, /\t 7: from \(irb\):1:in `<instance of Object>#a13'\n/,
+          :*, /\t 6: from \(irb\):1:in `<instance of Object>#a14'\n/,
+          :*, /\t 5: from \(irb\):1:in `<instance of Object>#a15'\n/,
+          :*, /\t 4: from \(irb\):1:in `<instance of Object>#a16'\n/,
+          :*, /\t 3: from \(irb\):1:in `<instance of Object>#a17'\n/,
+          :*, /\t 2: from \(irb\):1:in `<instance of Object>#a18'\n/,
+          :*, /\t 1: from \(irb\):1:in `<instance of Object>#a19'\n/,
           :*, /\(irb\):1:in `a20': unhandled exception\n/,
         ]
       else
         expected = [
-          :*, /\(irb\):1:in `a20': unhandled exception\n/,
-          :*, /\tfrom \(irb\):1:in `a19'\n/,
-          :*, /\tfrom \(irb\):1:in `a18'\n/,
-          :*, /\tfrom \(irb\):1:in `a17'\n/,
-          :*, /\tfrom \(irb\):1:in `a16'\n/,
-          :*, /\tfrom \(irb\):1:in `a15'\n/,
-          :*, /\tfrom \(irb\):1:in `a14'\n/,
-          :*, /\tfrom \(irb\):1:in `a13'\n/,
-          :*, /\tfrom \(irb\):1:in `a12'\n/,
-          :*, /\tfrom \(irb\):1:in `a11'\n/,
-          :*, /\tfrom \(irb\):1:in `a10'\n/,
-          :*, /\tfrom \(irb\):1:in `a9'\n/,
-          :*, /\tfrom \(irb\):1:in `a8'\n/,
-          :*, /\tfrom \(irb\):1:in `a7'\n/,
-          :*, /\tfrom \(irb\):1:in `a6'\n/,
-          :*, /\tfrom \(irb\):1:in `a5'\n/,
-          :*, /\tfrom \(irb\):1:in `a4'\n/,
+          :*, /\(irb\):1:in `<instance of Object>#a20': unhandled exception\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a19'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a18'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a17'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a16'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a15'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a14'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a13'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a12'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a11'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a10'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a9'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a8'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a7'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a6'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a5'\n/,
+          :*, /\tfrom \(irb\):1:in `<instance of Object>#a4'\n/,
           :*, /\t... \d+ levels...\n/,
         ]
       end

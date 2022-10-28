@@ -1434,7 +1434,7 @@ class TestMethod < Test::Unit::TestCase
     begin
       $f.call(1)
     rescue ArgumentError => e
-      assert_equal "(eval):#{$line_lambda.to_s}:in `block in <main>'", e.backtrace.first
+      assert_equal "(eval):#{$line_lambda.to_s}:in `block in eval in (main)'", e.backtrace.first
     end
     begin
       foo(1)
