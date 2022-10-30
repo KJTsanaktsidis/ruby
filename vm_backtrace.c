@@ -31,6 +31,9 @@ id2str(ID id)
 }
 #define rb_id2str(id) id2str(id)
 
+static VALUE
+frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq);
+
 #define BACKTRACE_START 0
 #define ALL_BACKTRACE_LINES -1
 
@@ -433,6 +436,39 @@ pretty_name_for_class_iseq(const rb_iseq_t *iseq, int depth)
     return rb_sprintf("%s%"PRIsVALUE"%"PRIsVALUE, prefix, parent_namespace, class_or_module_name);
 }
 
+
+
+static VALUE
+pretty_name_for_iseq_chain(const rb_iseq_t *iseq)
+{
+  const rb_iseq_t *next_iseq = iseq;
+  int level = 0;
+  do {
+      level++;
+      next_iseq = ISEQ_BODY(next_iseq)->parent_iseq;
+  } while (next_iseq && ISEQ_BODY(next_iseq)->type == ISEQ_BODY(iseq)->type);
+
+  const char *type_label = "";
+  switch (ISEQ_BODY(iseq)->type) {
+    case ISEQ_TYPE_BLOCK:
+      type_label = "block";
+      break;
+    case ISEQ_TYPE_EVAL:
+      type_label = "eval";
+      break;
+    default:
+      rb_bug("pretty_name_for_iseq_chain: unreachable");
+      UNREACHABLE;
+  }
+
+  VALUE in_name = frame_pretty_name(NULL, next_iseq);
+  if (level == 1) {
+      return rb_sprintf("%s in %"PRIsVALUE, type_label, in_name);
+  } else {
+      return rb_sprintf("%s (%d levels) in %"PRIsVALUE, type_label, level, in_name);
+  }
+}
+
 static VALUE
 frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
 {
@@ -449,13 +485,9 @@ frame_pretty_name(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
           case ISEQ_TYPE_TOP:
             return rb_str_new_literal("(top)");
           case ISEQ_TYPE_BLOCK:
-            if (!cme && parent_iseq) {
-                return rb_sprintf("block in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
-            }
-            break;
           case ISEQ_TYPE_EVAL:
             if (!cme && parent_iseq) {
-                return rb_sprintf("eval in %"PRIsVALUE, frame_pretty_name(NULL, parent_iseq));
+                return pretty_name_for_iseq_chain(iseq);
             }
             break;
           case ISEQ_TYPE_RESCUE:

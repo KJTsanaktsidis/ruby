@@ -447,6 +447,12 @@ class TestBacktrace < Test::Unit::TestCase
           1.times { #{capture_expr} }
         end
 
+        1.times do
+          define_method(:bmethod_defined_in_block) do
+            1.times { #{capture_expr} }
+          end
+        end
+
         def ex_begin
           begin
             #{capture_expr}
@@ -862,10 +868,21 @@ class TestBacktrace < Test::Unit::TestCase
     program = build_bt_prog("eval #{"eval #{string.inspect}".inspect}", frame_count: 6);
     expected = [
       "SimpleExampleClass.ex_singleton",
-      "eval in eval in (main)",
+      "eval (2 levels) in (main)",
       "Kernel#eval",
       "eval in (main)",
       "Kernel#eval",
+      "(main)"
+    ]
+    assert_in_out_err([], program, expected, [])
+  end
+
+  def test_pretty_bmethod_defined_in_block
+    program = build_bt_prog("SimpleExampleClass.new.bmethod_defined_in_block", frame_count: 4)
+    expected = [
+      "block in SimpleExampleClass#bmethod_defined_in_block",
+      "Integer#times",
+      "block in SimpleExampleClass#bmethod_defined_in_block",
       "(main)"
     ]
     assert_in_out_err([], program, expected, [])
