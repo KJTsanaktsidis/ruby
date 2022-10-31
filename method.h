@@ -53,10 +53,12 @@ typedef struct rb_cref_struct {
 
 typedef struct rb_method_entry_ext_struct {
     VALUE owner;
+    VALUE full_name;
 } rb_method_entry_ext_t;
 
 typedef struct rb_callable_method_entry_ext_struct {
     const VALUE owner;
+    const VALUE full_name;
 } rb_callable_method_entry_ext_t;
 
 typedef struct rb_method_entry_struct {
