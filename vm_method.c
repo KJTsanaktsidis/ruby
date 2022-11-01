@@ -503,103 +503,6 @@ setup_method_cfunc_struct(rb_method_cfunc_t *cfunc, VALUE (*func)(ANYARGS), int 
     cfunc->invoker = call_cfunc_invoker_func(argc);
 }
 
-static VALUE
-method_full_name_classpath_impl(VALUE klass, int depth, bool *output_is_singleton)
-{
-    if (!RB_TEST(klass)) {
-        return rb_str_new_literal("unknown class");
-    }
-
-    if (depth == 0) {
-        // The default output, we might change it lower down
-        *output_is_singleton = false;
-    }
-
-    VALUE refinement_klass = rb_class_of(klass);
-    if (FL_TEST(refinement_klass, RMODULE_IS_REFINEMENT)) {
-        ID id_refined_class;
-        CONST_ID(id_refined_class, "__refined_class__");
-        VALUE refined_class = rb_attr_get(refinement_klass, id_refined_class);
-
-        ID id_defined_at;
-        CONST_ID(id_defined_at, "__defined_at__");
-        VALUE defined_at = rb_attr_get(refinement_klass, id_defined_at);
-
-        return rb_sprintf("<refinement %"PRIsVALUE" of %"PRIsVALUE">",
-                          defined_at, method_full_name_classpath_impl(refined_class, depth + 1, output_is_singleton));
-    } else if (RB_TYPE_P(klass, T_ICLASS)) {
-        return rb_class_path(RBASIC(klass)->klass);
-    }
-    else if (FL_TEST(klass, FL_SINGLETON)) {
-        VALUE attached_to = rb_ivar_get(klass, id__attached__);
-        if (RB_TYPE_P(attached_to, T_CLASS) || RB_TYPE_P(attached_to, T_MODULE)) {
-            VALUE attached_to_str = method_full_name_classpath_impl(attached_to, depth + 1, output_is_singleton);
-            // class or instance method
-            if (depth == 0) {
-                *output_is_singleton = true;
-                return method_full_name_classpath_impl(attached_to, depth + 1, output_is_singleton);
-            } else {
-                return rb_sprintf("<singleton of %"PRIsVALUE">", attached_to_str);
-            }
-        } else {
-            // method defined on a single instance or something
-            return rb_sprintf("<instance of %"PRIsVALUE">",
-                              method_full_name_classpath_impl(rb_class_real(klass), depth + 1, output_is_singleton));
-        }
-    } else if (!RB_TEST(rb_mod_name(klass))) {
-        // Anonymous module/class - print the name of the first non-anonymous super.
-        // something like "#{klazz.ancestors.map(&:name).compact.first}$anonymous"
-        //
-        // Note that if klazz is a module, we want to do this on klazz.class, not
-        // klazz itself:
-        //
-        //   irb(main):008:0> m = Module.new
-        //   => #<Module:0x00000000021a7208>
-        //   irb(main):009:0> m.ancestors
-        //   => [#<Module:0x00000000021a7208>]
-        //   # Not very useful - nothing with a name is in the ancestor chain
-        //   irb(main):010:0> m.class.ancestors
-        //   => [Module, Object, Kernel, BasicObject]
-        //   # Much more useful - we can call this Module$anonymous.
-
-        // Find an actual class - every _class_ is guaranteed to be a descendant of
-        // BasicObject at least, which has a name, so we'll be able to name this
-        // _something_.
-        while (!RB_TYPE_P(klass, T_CLASS)) {
-            klass = rb_class_of(klass);
-        }
-        while (!RB_TEST(rb_mod_name(klass))) {
-            klass = rb_class_superclass(klass);
-        }
-        return rb_sprintf("<anonymous subclass of %"PRIsVALUE">",
-                          method_full_name_classpath_impl(klass, depth + 1, output_is_singleton));
-    } else {
-        return rb_class_path(klass);
-    }
-}
-
-static void
-rb_method_entry_set_full_name(const rb_method_entry_t *me)
-{
-    if (!me->def) {
-        RB_OBJ_WRITE(me, &METHOD_ENTRY_EXT(me)->full_name, rb_str_new_literal("<unknown method>"));
-        return;
-    }
-    const char *separator = "#";
-    bool classpath_is_singleton = false;
-    VALUE classpath_str = method_full_name_classpath_impl(me->defined_class, 0, &classpath_is_singleton);
-    if (classpath_is_singleton) {
-        separator = ".";
-    }
-    VALUE full_name = rb_sprintf("%"PRIsVALUE"%s%"PRIsVALUE,
-                                 classpath_str, separator, rb_id2str(me->def->original_id));
-    if (me->called_id != me->def->original_id) {
-        full_name = rb_sprintf("%"PRIsVALUE" (aliased as %s%"PRIsVALUE")",
-                               full_name, separator, rb_id2str(me->called_id));
-    }
-    RB_OBJ_WRITE(me, &METHOD_ENTRY_EXT(me)->full_name, full_name);
-}
-
 MJIT_FUNC_EXPORTED void
 rb_method_definition_set(const rb_method_entry_t *me, rb_method_definition_t *def, void *opts)
 {
@@ -628,13 +531,13 @@ rb_method_definition_set(const rb_method_entry_t *me, rb_method_definition_t *de
                 }
 
                 RB_OBJ_WRITE(me, &def->body.iseq.cref, method_cref);
-                break;
+                return;
             }
           case VM_METHOD_TYPE_CFUNC:
             {
                 rb_method_cfunc_t *cfunc = (rb_method_cfunc_t *)opts;
                 setup_method_cfunc_struct(UNALIGNED_MEMBER_PTR(def, body.cfunc), cfunc->func, cfunc->argc);
-                break;
+                return;
             }
           case VM_METHOD_TYPE_ATTRSET:
           case VM_METHOD_TYPE_IVAR:
@@ -654,36 +557,34 @@ rb_method_definition_set(const rb_method_entry_t *me, rb_method_definition_t *de
                 else {
                     VM_ASSERT(def->body.attr.location == 0);
                 }
-                break;
+                return;
             }
           case VM_METHOD_TYPE_BMETHOD:
             RB_OBJ_WRITE(me, &def->body.bmethod.proc, (VALUE)opts);
             RB_OBJ_WRITE(me, &def->body.bmethod.defined_ractor, rb_ractor_self(GET_RACTOR()));
-            break;
+            return;
           case VM_METHOD_TYPE_NOTIMPLEMENTED:
             setup_method_cfunc_struct(UNALIGNED_MEMBER_PTR(def, body.cfunc), (VALUE(*)(ANYARGS))rb_f_notimplement_internal, -1);
-            break;
+            return;
           case VM_METHOD_TYPE_OPTIMIZED:
             def->body.optimized = *(rb_method_optimized_t *)opts;
-            break;
+            return;
           case VM_METHOD_TYPE_REFINED:
             {
                 const rb_method_refined_t *refined = (rb_method_refined_t *)opts;
                 RB_OBJ_WRITE(me, &def->body.refined.orig_me, refined->orig_me);
                 RB_OBJ_WRITE(me, &def->body.refined.owner, refined->owner);
-                break;
+                return;
             }
           case VM_METHOD_TYPE_ALIAS:
             RB_OBJ_WRITE(me, &def->body.alias.original_me, (rb_method_entry_t *)opts);
-            break;
+            return;
           case VM_METHOD_TYPE_ZSUPER:
           case VM_METHOD_TYPE_UNDEF:
           case VM_METHOD_TYPE_MISSING:
-            break;
+            return;
         }
     }
-
-    rb_method_entry_set_full_name(me);
 }
 
 static void
@@ -764,7 +665,6 @@ rb_method_entry_alloc(ID called_id, VALUE owner, VALUE defined_class, const rb_m
     *(rb_method_definition_t **)&me->def = (rb_method_definition_t *)def;
     me->called_id = called_id;
     RB_OBJ_WRITE(me, &METHOD_ENTRY_EXT(me)->owner, owner);
-    rb_method_entry_set_full_name(me);
     return me;
 }
 
@@ -1032,7 +932,6 @@ rb_method_entry_make(VALUE klass, ID mid, VALUE defined_class, rb_method_visibil
     me = rb_method_entry_create(mid, defined_class, visi, NULL);
     if (def == NULL) def = rb_method_definition_create(type, original_id);
     rb_method_definition_set(me, def, opts);
-
 
     rb_clear_method_cache(klass, mid);
 

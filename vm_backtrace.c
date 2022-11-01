@@ -286,21 +286,110 @@ location_base_label_m(VALUE self)
 }
 
 static VALUE
-location_full_label(rb_backtrace_location_t *loc)
+location_full_name_class_name(VALUE klass, int depth, bool *output_is_singleton)
 {
-    if (!loc->cme) {
-        return location_label(loc);
+    if (!RB_TEST(klass)) {
+        return rb_str_new_literal("unknown class");
     }
-    VALUE cme_full_name = CALLABLE_METHOD_ENTRY_EXT(loc->cme)->full_name;
-    if (!loc->iseq || loc->type == LOCATION_TYPE_CFUNC) {
-        return cme_full_name;
+
+    if (depth == 0) {
+        // The default output, we might change it lower down
+        *output_is_singleton = false;
     }
+
+    VALUE refinement_klass = rb_class_of(klass);
+    if (FL_TEST(refinement_klass, RMODULE_IS_REFINEMENT)) {
+        ID id_refined_class;
+        CONST_ID(id_refined_class, "__refined_class__");
+        VALUE refined_class = rb_attr_get(refinement_klass, id_refined_class);
+
+        ID id_defined_at;
+        CONST_ID(id_defined_at, "__defined_at__");
+        VALUE defined_at = rb_attr_get(refinement_klass, id_defined_at);
+
+        return rb_sprintf("<refinement %"PRIsVALUE" of %"PRIsVALUE">",
+                          defined_at, location_full_name_class_name(refined_class, depth + 1, output_is_singleton));
+    } else if (RB_TYPE_P(klass, T_ICLASS)) {
+        return rb_class_path(RBASIC(klass)->klass);
+    }
+    else if (FL_TEST(klass, FL_SINGLETON)) {
+        VALUE attached_to = rb_ivar_get(klass, id__attached__);
+        if (RB_TYPE_P(attached_to, T_CLASS) || RB_TYPE_P(attached_to, T_MODULE)) {
+            VALUE attached_to_str = location_full_name_class_name(attached_to, depth + 1, output_is_singleton);
+            // class or instance method
+            if (depth == 0) {
+                *output_is_singleton = true;
+                return location_full_name_class_name(attached_to, depth + 1, output_is_singleton);
+            } else {
+                return rb_sprintf("<singleton of %"PRIsVALUE">", attached_to_str);
+            }
+        } else {
+            // method defined on a single instance or something
+            return rb_sprintf("<instance of %"PRIsVALUE">",
+                              location_full_name_class_name(rb_class_real(klass), depth + 1, output_is_singleton));
+        }
+    } else if (!RB_TEST(rb_mod_name(klass))) {
+        // Anonymous module/class - print the name of the first non-anonymous super.
+        // something like "#{klazz.ancestors.map(&:name).compact.first}$anonymous"
+        //
+        // Note that if klazz is a module, we want to do this on klazz.class, not
+        // klazz itself:
+        //
+        //   irb(main):008:0> m = Module.new
+        //   => #<Module:0x00000000021a7208>
+        //   irb(main):009:0> m.ancestors
+        //   => [#<Module:0x00000000021a7208>]
+        //   # Not very useful - nothing with a name is in the ancestor chain
+        //   irb(main):010:0> m.class.ancestors
+        //   => [Module, Object, Kernel, BasicObject]
+        //   # Much more useful - we can call this Module$anonymous.
+
+        // Find an actual class - every _class_ is guaranteed to be a descendant of
+        // BasicObject at least, which has a name, so we'll be able to name this
+        // _something_.
+        while (!RB_TYPE_P(klass, T_CLASS)) {
+            klass = rb_class_of(klass);
+        }
+        while (!RB_TEST(rb_mod_name(klass))) {
+            klass = rb_class_superclass(klass);
+        }
+        return rb_sprintf("<anonymous subclass of %"PRIsVALUE">",
+                          location_full_name_class_name(klass, depth + 1, output_is_singleton));
+    } else {
+        return rb_class_path(klass);
+    }
+}
+
+static VALUE 
+location_full_name_method_name(const rb_callable_method_entry_t *me)
+{
+    if (!me->def) {
+        return rb_str_new_literal("<unknown method>");
+    }
+    const char *separator = "#";
+    bool classpath_is_singleton = false;
+    VALUE classpath_str = location_full_name_class_name(me->defined_class, 0, &classpath_is_singleton);
+    if (classpath_is_singleton) {
+        separator = ".";
+    }
+    VALUE full_name = rb_sprintf("%"PRIsVALUE"%s%"PRIsVALUE,
+                                 classpath_str, separator, rb_id2str(me->def->original_id));
+    if (me->called_id != me->def->original_id) {
+        full_name = rb_sprintf("%"PRIsVALUE" (aliased as %s%"PRIsVALUE")",
+                               full_name, separator, rb_id2str(me->called_id));
+    }
+    return full_name;
+}
+
+static VALUE
+location_full_name_iseq_prefix(const rb_iseq_t *iseq)
+{
     // If an iseq is block or eval, calculate how deeply it's nested.
     const char *type_label = "";
     bool check_nesting = false;
     bool has_prefix = false;
     int level = 1;
-    switch (ISEQ_BODY(loc->iseq)->type) {
+    switch (ISEQ_BODY(iseq)->type) {
       case ISEQ_TYPE_BLOCK:
         type_label = "block";
         check_nesting = true;
@@ -323,20 +412,34 @@ location_full_label(rb_backtrace_location_t *loc)
         break;
     }
     if (check_nesting) {
-        const rb_iseq_t *next_iseq = loc->iseq;
+        const rb_iseq_t *next_iseq = iseq;
         level = 0;
         do {
             level++;
             next_iseq = ISEQ_BODY(next_iseq)->parent_iseq;
-        } while (next_iseq && ISEQ_BODY(next_iseq)->type == ISEQ_BODY(loc->iseq)->type);
+        } while (next_iseq && ISEQ_BODY(next_iseq)->type == ISEQ_BODY(iseq)->type);
     }
     if (!has_prefix) {
-        return cme_full_name;
+        return rb_str_new_literal("");
     } else if (level == 1) {
-        return rb_sprintf("%s in %"PRIsVALUE, type_label, cme_full_name);
+        return rb_sprintf("%s in ", type_label);
     } else {
-        return rb_sprintf("%s (%d levels) in %"PRIsVALUE, type_label, level, cme_full_name);
+        return rb_sprintf("%s (%d levels) in ", type_label, level);
     }
+}
+
+static VALUE
+location_full_label(rb_backtrace_location_t *loc)
+{
+    if (!loc->cme) {
+        return location_label(loc);
+    }
+    VALUE method_name = location_full_name_method_name(loc->cme);
+    if (!loc->iseq || loc->type == LOCATION_TYPE_CFUNC) {
+        return method_name;
+    }
+    VALUE prefix = location_full_name_iseq_prefix(loc->iseq);
+    return rb_sprintf("%"PRIsVALUE"%"PRIsVALUE, prefix, method_name);
 }
 
 /*

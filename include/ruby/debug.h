@@ -617,6 +617,29 @@ int rb_postponed_job_register(unsigned int flags, rb_postponed_job_func_t func, 
  */
 int rb_postponed_job_register_one(unsigned int flags, rb_postponed_job_func_t func, void *data);
 
+typedef enum rb_exposed_frame_prefix_type_enum {
+    EXPOSED_FRAME_PREFIX_NONE = 0,
+    EXPOSED_FRAME_PREFIX_BLOCK = 1,
+    EXPOSED_FRAME_PREFIX_EVAL = 2,
+    EXPOSED_FRAME_PREFIX_RESCUE = 3,
+    EXPOSED_FRAME_PREFIX_ENSURE = 4,
+} rb_exposed_frame_prefix_type_t;
+
+typedef struct rb_exposed_frame_info_struct {
+    int cfunc : 1;
+    int singleton_separator : 1;
+    int module_exec : 1;
+    int class_exec : 1;
+    int refinement : 1;
+    int method_entry_present : 1;
+    int prefix_type : 3;
+    int levels_deep : 8;
+    const char *klass_name;
+    const char *method_name;
+    const char *refined_klass_name;
+    uintptr_t method_serial; 
+} rb_exposed_frame_info_t;
+
 /** @} */
 
 /**

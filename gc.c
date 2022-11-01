@@ -6662,7 +6662,6 @@ mark_method_entry(rb_objspace_t *objspace, const rb_method_entry_t *me)
     const rb_method_definition_t *def = me->def;
 
     gc_mark(objspace, METHOD_ENTRY_EXT(me)->owner);
-    gc_mark(objspace, METHOD_ENTRY_EXT(me)->full_name);
     gc_mark(objspace, me->defined_class);
 
     if (def) {
@@ -10136,7 +10135,6 @@ gc_ref_update_method_entry(rb_objspace_t *objspace, rb_method_entry_t *me)
     rb_method_definition_t *def = me->def;
 
     UPDATE_IF_MOVED(objspace, METHOD_ENTRY_EXT(me)->owner);
-    UPDATE_IF_MOVED(objspace, METHOD_ENTRY_EXT(me)->full_name);
     UPDATE_IF_MOVED(objspace, me->defined_class);
 
     if (def) {
