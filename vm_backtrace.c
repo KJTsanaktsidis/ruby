@@ -433,7 +433,7 @@ location_full_name_iseq_prefix(const rb_iseq_t *iseq)
 VALUE
 full_name_for_method_iseq_pair(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
 {
-    if (!cme || !iseq) {
+    if (!cme && !iseq) {
         return rb_str_new_literal("<unknown frame>");
     }
     if (!cme) {
