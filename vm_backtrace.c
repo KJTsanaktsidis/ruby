@@ -14,6 +14,8 @@
 #include "internal/error.h"
 #include "internal/vm.h"
 #include "iseq.h"
+#include "method.h"
+#include "ruby/external_debug.h"
 #include "ruby/debug.h"
 #include "ruby/encoding.h"
 #include "vm_core.h"
@@ -32,6 +34,9 @@ id2str(ID id)
 
 #define BACKTRACE_START 0
 #define ALL_BACKTRACE_LINES -1
+
+__attribute__(( section("external_debug") ))
+rb_external_debug_header_t external_debug_header;
 
 inline static int
 calc_pos(const rb_iseq_t *iseq, const VALUE *pc, int *lineno, int *node_id)

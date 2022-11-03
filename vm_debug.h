@@ -11,6 +11,7 @@
 
 **********************************************************************/
 
+#include "ruby/external_debug.h"
 #include "ruby/ruby.h"
 
 RUBY_SYMBOL_EXPORT_BEGIN
@@ -31,6 +32,7 @@ int   ruby_debug_print_indent(int level, int debug_level, int indent_level);
 void  ruby_debug_gc_check_func(void);
 void ruby_set_debug_option(const char *str);
 
+extern rb_external_debug_header_t external_debug_header;
 VALUE full_name_for_method_iseq_pair(const struct rb_callable_method_entry_struct *cme, const struct rb_iseq_struct *iseq);
 
 RUBY_SYMBOL_EXPORT_END
