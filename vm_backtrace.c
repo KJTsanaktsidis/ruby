@@ -363,9 +363,6 @@ location_full_name_class_name(VALUE klass, int depth, bool *output_is_singleton)
 static VALUE 
 location_full_name_method_name(const rb_callable_method_entry_t *me)
 {
-    if (!me->def) {
-        return rb_str_new_literal("<unknown method>");
-    }
     const char *separator = "#";
     bool classpath_is_singleton = false;
     VALUE classpath_str = location_full_name_class_name(me->defined_class, 0, &classpath_is_singleton);
@@ -428,18 +425,31 @@ location_full_name_iseq_prefix(const rb_iseq_t *iseq)
     }
 }
 
+VALUE
+full_name_for_method_iseq_pair(const rb_callable_method_entry_t *cme, const rb_iseq_t *iseq)
+{
+    if (!cme || !iseq) {
+        return rb_str_new_literal("<unknown frame>");
+    }
+    if (!cme) {
+        return ISEQ_BODY(iseq)->location.label;
+    }
+    if (!cme->def) {
+        return rb_str_new_literal("<unknown method>");
+    }
+    VALUE method_name = location_full_name_method_name(cme);
+    if (!iseq || cme->def->type == VM_METHOD_TYPE_CFUNC) {
+        return method_name;
+    }
+    VALUE prefix = location_full_name_iseq_prefix(iseq);
+    return rb_sprintf("%"PRIsVALUE"%"PRIsVALUE, prefix, method_name);
+
+}
+
 static VALUE
 location_full_label(rb_backtrace_location_t *loc)
 {
-    if (!loc->cme) {
-        return location_label(loc);
-    }
-    VALUE method_name = location_full_name_method_name(loc->cme);
-    if (!loc->iseq || loc->type == LOCATION_TYPE_CFUNC) {
-        return method_name;
-    }
-    VALUE prefix = location_full_name_iseq_prefix(loc->iseq);
-    return rb_sprintf("%"PRIsVALUE"%"PRIsVALUE, prefix, method_name);
+    return full_name_for_method_iseq_pair(loc->cme, loc->iseq);
 }
 
 /*

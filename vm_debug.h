@@ -21,6 +21,8 @@ RUBY_SYMBOL_EXPORT_BEGIN
 #define dpn(n)   ruby_debug_print_node(-1, 0, "", (n))
 
 struct RNode;
+struct rb_callable_method_entry_struct;
+struct rb_iseq_struct;
 
 VALUE ruby_debug_print_value(int level, int debug_level, const char *header, VALUE v);
 ID    ruby_debug_print_id(int level, int debug_level, const char *header, ID id);
@@ -28,6 +30,8 @@ struct RNode *ruby_debug_print_node(int level, int debug_level, const char *head
 int   ruby_debug_print_indent(int level, int debug_level, int indent_level);
 void  ruby_debug_gc_check_func(void);
 void ruby_set_debug_option(const char *str);
+
+VALUE full_name_for_method_iseq_pair(const struct rb_callable_method_entry_struct *cme, const struct rb_iseq_struct *iseq);
 
 RUBY_SYMBOL_EXPORT_END
 
