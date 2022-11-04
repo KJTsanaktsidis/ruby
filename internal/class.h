@@ -56,6 +56,17 @@ struct rb_classext_struct {
 #if !SHAPE_IN_BASIC_FLAGS
     shape_id_t shape_id;
 #endif
+
+    /**
+     * These used to be the hidden __classpath__ and __tmp_classpath__ ivars.
+     * They are now part of rb_classext_t so that they can be accessed quickly
+     * for unwinding ruby backtraces in profiling tools.
+     * Qfalse means "not (yet?) set", and Qnil means "set to nil" (i.e. - all classes
+     * begin with their classpath value set to Qfalse, but an anonymous class will
+     * subsequently get classpath set to Qnil).
+    */
+    VALUE classpath;
+    VALUE tmp_classpath;
 };
 
 struct RClass {

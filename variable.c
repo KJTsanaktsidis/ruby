@@ -46,7 +46,7 @@ RUBY_EXTERN rb_serial_t ruby_vm_global_cvar_state;
 typedef void rb_gvar_compact_t(void *var);
 
 static struct rb_id_table *rb_global_tbl;
-static ID autoload, classpath, tmp_classpath;
+static ID autoload;
 
 // This hash table maps file paths to loadable features. We use this to track
 // autoload state until it's no longer needed.
@@ -75,10 +75,6 @@ Init_var_tables(void)
     rb_global_tbl = rb_id_table_create(0);
     generic_iv_tbl_ = st_init_numtable();
     autoload = rb_intern_const("__autoload__");
-    /* __classpath__: fully qualified class path */
-    classpath = rb_intern_const("__classpath__");
-    /* __tmp_classpath__: temporary class path which contains anonymous names */
-    tmp_classpath = rb_intern_const("__tmp_classpath__");
 
     autoload_mutex = rb_mutex_new();
     rb_obj_hide(autoload_mutex);
@@ -111,17 +107,19 @@ rb_namespace_p(VALUE obj)
 static VALUE
 classname(VALUE klass, int *permanent)
 {
-    st_table *ivtbl;
-    st_data_t n;
-
+    VALUE n;
     *permanent = 0;
+
     if (!RCLASS_EXT(klass)) return Qnil;
-    if (!(ivtbl = RCLASS_IV_TBL(klass))) return Qnil;
-    if (st_lookup(ivtbl, (st_data_t)classpath, &n)) {
+    n = RCLASS_EXT(klass)->classpath;
+    if (n != Qfalse) {
         *permanent = 1;
-        return (VALUE)n;
+        return n;
     }
-    if (st_lookup(ivtbl, (st_data_t)tmp_classpath, &n)) return (VALUE)n;
+    n = RCLASS_EXT(klass)->tmp_classpath;
+    if (n != Qfalse) {
+        return n;
+    }
     return Qnil;
 }
 
@@ -230,7 +228,7 @@ void
 rb_set_class_path_string(VALUE klass, VALUE under, VALUE name)
 {
     VALUE str;
-    ID pathid = classpath;
+    VALUE *path_slot = &RCLASS_EXT(klass)->classpath;
 
     if (under == rb_cObject) {
         str = rb_str_new_frozen(name);
@@ -240,10 +238,10 @@ rb_set_class_path_string(VALUE klass, VALUE under, VALUE name)
         str = rb_tmp_class_path(under, &permanent, make_temporary_path);
         str = build_const_pathname(str, name);
         if (!permanent) {
-            pathid = tmp_classpath;
+            path_slot = &RCLASS_EXT(klass)->tmp_classpath;
         }
     }
-    rb_ivar_set(klass, pathid, str);
+    RB_OBJ_WRITE(klass, path_slot, str);
 }
 
 void
@@ -3130,8 +3128,7 @@ set_namespace_path_i(ID id, VALUE v, void *payload)
     }
     set_namespace_path(value, build_const_path(parental_path, id));
     if (RCLASS_IV_TBL(value)) {
-        st_data_t tmp = tmp_classpath;
-        st_delete(RCLASS_IV_TBL(value), &tmp, 0);
+        RB_OBJ_WRITE(value, &RCLASS_EXT(value)->tmp_classpath, Qfalse);
     }
 
     return ID_TABLE_CONTINUE;
@@ -3149,7 +3146,7 @@ set_namespace_path(VALUE named_namespace, VALUE namespace_path)
 
     RB_VM_LOCK_ENTER();
     {
-        rb_class_ivar_set(named_namespace, classpath, namespace_path);
+        RB_OBJ_WRITE(named_namespace, &RCLASS_EXT(named_namespace)->classpath, namespace_path);
         if (const_table) {
             rb_id_table_foreach(const_table, set_namespace_path_i, &namespace_path);
         }
@@ -3226,7 +3223,7 @@ const_set(VALUE klass, ID id, VALUE val)
                     set_namespace_path(val, build_const_path(parental_path, id));
                 }
                 else if (!parental_path_permanent && NIL_P(val_path)) {
-                    ivar_set(val, tmp_classpath, build_const_path(parental_path, id));
+                    RB_OBJ_WRITE(val, &RCLASS_EXT(val)->tmp_classpath, build_const_path(parental_path, id));
                 }
             }
         }
