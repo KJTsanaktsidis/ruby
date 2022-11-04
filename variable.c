@@ -46,7 +46,7 @@ RUBY_EXTERN rb_serial_t ruby_vm_global_cvar_state;
 typedef void rb_gvar_compact_t(void *var);
 
 static struct rb_id_table *rb_global_tbl;
-static ID autoload, classpath, tmp_classpath;
+static ID autoload;
 
 // This hash table maps file paths to loadable features. We use this to track
 // autoload state until it's no longer needed.
@@ -75,10 +75,6 @@ Init_var_tables(void)
     rb_global_tbl = rb_id_table_create(0);
     generic_iv_tbl_ = st_init_numtable();
     autoload = rb_intern_const("__autoload__");
-    /* __classpath__: fully qualified class path */
-    classpath = rb_intern_const("__classpath__");
-    /* __tmp_classpath__: temporary class path which contains anonymous names */
-    tmp_classpath = rb_intern_const("__tmp_classpath__");
 
     autoload_mutex = rb_mutex_new();
     rb_obj_hide(autoload_mutex);
@@ -111,18 +107,15 @@ rb_namespace_p(VALUE obj)
 static VALUE
 classname(VALUE klass, int *permanent)
 {
-    st_table *ivtbl;
-    st_data_t n;
-
-    *permanent = 0;
-    if (!RCLASS_EXT(klass)) return Qnil;
-    if (!(ivtbl = RCLASS_IV_TBL(klass))) return Qnil;
-    if (st_lookup(ivtbl, (st_data_t)classpath, &n)) {
-        *permanent = 1;
-        return (VALUE)n;
+    if (!RCLASS_EXT(klass)) {
+        *permanent = 0;
+        return Qnil;
     }
-    if (st_lookup(ivtbl, (st_data_t)tmp_classpath, &n)) return (VALUE)n;
-    return Qnil;
+    *permanent = FL_TEST(klass, RCLASS_CLASSPATH_PERMANENT);
+    VALUE path = RCLASS_EXT(klass)->classpath;
+    // Needed because some things explicitly check the return value for Qnil.
+    if (!RB_TEST(path)) return Qnil;
+    return path;
 }
 
 /*
@@ -230,20 +223,23 @@ void
 rb_set_class_path_string(VALUE klass, VALUE under, VALUE name)
 {
     VALUE str;
-    ID pathid = classpath;
+    int was_already_permanent = FL_TEST(klass, RCLASS_CLASSPATH_PERMANENT);
+    int new_name_permanent;
 
     if (under == rb_cObject) {
         str = rb_str_new_frozen(name);
+        new_name_permanent = 1;
     }
     else {
-        int permanent;
-        str = rb_tmp_class_path(under, &permanent, make_temporary_path);
+        str = rb_tmp_class_path(under, &new_name_permanent, make_temporary_path);
         str = build_const_pathname(str, name);
-        if (!permanent) {
-            pathid = tmp_classpath;
-        }
     }
-    rb_ivar_set(klass, pathid, str);
+    if (new_name_permanent || !was_already_permanent) {
+        RB_OBJ_WRITE(klass, &RCLASS_EXT(klass)->classpath, str);
+    }
+    if (new_name_permanent && !was_already_permanent) {
+        FL_SET(klass, RCLASS_CLASSPATH_PERMANENT);
+    }
 }
 
 void
@@ -3129,9 +3125,8 @@ set_namespace_path_i(ID id, VALUE v, void *payload)
         return ID_TABLE_CONTINUE;
     }
     set_namespace_path(value, build_const_path(parental_path, id));
-    if (RCLASS_IV_TBL(value)) {
-        st_data_t tmp = tmp_classpath;
-        st_delete(RCLASS_IV_TBL(value), &tmp, 0);
+    if (!FL_TEST(value, RCLASS_CLASSPATH_PERMANENT)) {
+        RB_OBJ_WRITE(value, &RCLASS_EXT(value)->classpath, Qfalse);
     }
 
     return ID_TABLE_CONTINUE;
@@ -3149,7 +3144,8 @@ set_namespace_path(VALUE named_namespace, VALUE namespace_path)
 
     RB_VM_LOCK_ENTER();
     {
-        rb_class_ivar_set(named_namespace, classpath, namespace_path);
+        RB_OBJ_WRITE(named_namespace, &RCLASS_EXT(named_namespace)->classpath, namespace_path);
+        FL_SET(named_namespace, RCLASS_CLASSPATH_PERMANENT);
         if (const_table) {
             rb_id_table_foreach(const_table, set_namespace_path_i, &namespace_path);
         }
@@ -3225,8 +3221,8 @@ const_set(VALUE klass, ID id, VALUE val)
                 if (parental_path_permanent && !val_path_permanent) {
                     set_namespace_path(val, build_const_path(parental_path, id));
                 }
-                else if (!parental_path_permanent && NIL_P(val_path)) {
-                    ivar_set(val, tmp_classpath, build_const_path(parental_path, id));
+                else if (!parental_path_permanent && NIL_P(val_path) && !FL_TEST(val, RCLASS_CLASSPATH_PERMANENT)) {
+                    RB_OBJ_WRITE(val, &RCLASS_EXT(val)->classpath, build_const_path(parental_path, id));
                 }
             }
         }

@@ -56,6 +56,18 @@ struct rb_classext_struct {
 #if !SHAPE_IN_BASIC_FLAGS
     shape_id_t shape_id;
 #endif
+
+    /**
+     * These used to be the hidden __classpath__ and __tmp_classpath__ ivars.
+     * They are now part of rb_classext_t so that they can be accessed quickly
+     * for unwinding ruby backtraces in profiling tools.
+     * If classpath refers to a real, non-temporary, assigned-to-a-constant classpath,
+     * (i.e. what would previously been in __classpath__), then the RCLASS_CLASSPATH_PERMANENT
+     * flag is set on the class. Otherwise, it's a "temporary" classpath, that might
+     * change if the class is subsequently assigned to a constant (i.e. what was previously
+     * stored in __tmp_classpath__)
+    */
+    VALUE classpath;
 };
 
 struct RClass {
@@ -95,6 +107,7 @@ typedef struct rb_classext_struct rb_classext_t;
 #define RCLASS_CLONED     FL_USER1
 #define RCLASS_SUPERCLASSES_INCLUDE_SELF FL_USER2
 #define RICLASS_ORIGIN_SHARED_MTBL FL_USER3
+#define RCLASS_CLASSPATH_PERMANENT FL_USER4
 
 /* class.c */
 void rb_class_subclass_add(VALUE super, VALUE klass);
