@@ -7223,6 +7223,7 @@ gc_mark_children(rb_objspace_t *objspace, VALUE obj)
         mark_tbl_no_pin(objspace, RCLASS_IV_TBL(obj));
         mark_const_tbl(objspace, RCLASS_CONST_TBL(obj));
         gc_mark(objspace, RCLASS_EXT(obj)->classpath);
+        gc_mark(objspace, RCLASS_EXT(obj)->debug_name);
         break;
 
       case T_ICLASS:
@@ -7240,6 +7241,7 @@ gc_mark_children(rb_objspace_t *objspace, VALUE obj)
         mark_m_tbl(objspace, RCLASS_CALLABLE_M_TBL(obj));
         cc_table_mark(objspace, obj);
         gc_mark(objspace, RCLASS_EXT(obj)->classpath);
+        gc_mark(objspace, RCLASS_EXT(obj)->debug_name);
         break;
 
       case T_ARRAY:
@@ -10418,6 +10420,7 @@ update_class_ext(rb_objspace_t *objspace, rb_classext_t *ext)
     UPDATE_IF_MOVED(objspace, ext->includer);
     UPDATE_IF_MOVED(objspace, ext->refined_class);
     UPDATE_IF_MOVED(objspace, ext->classpath);
+    UPDATE_IF_MOVED(objspace, ext->debug_name);
     update_subclass_entries(objspace, ext->subclasses);
 }
 

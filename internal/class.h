@@ -68,6 +68,7 @@ struct rb_classext_struct {
      * stored in __tmp_classpath__)
     */
     VALUE classpath;
+    VALUE debug_name;
 };
 
 struct RClass {

@@ -219,6 +219,80 @@ build_const_path(VALUE head, ID tail)
     return build_const_pathname(head, rb_id2str(tail));
 }
 
+static VALUE
+build_debug_name(VALUE klass)
+{
+    if (!RB_TEST(klass)) {
+        return rb_str_new_literal("<unknown class>");
+    }
+    if (FL_TEST(klass, RMODULE_IS_REFINEMENT)) {
+        ID id_refined_class;
+        CONST_ID(id_refined_class, "__refined_class__");
+        VALUE refined_klass = rb_attr_get(klass, id_refined_class);
+
+        ID id_defined_at;
+        CONST_ID(id_defined_at, "__defined_at__");
+        VALUE defined_at = rb_attr_get(klass, id_defined_at);
+
+        return rb_sprintf("<refinement %"PRIsVALUE" of %"PRIsVALUE">",
+                          build_debug_name(defined_at),
+                          build_debug_name(refined_klass)); 
+    } else if (RB_TYPE_P(klass, T_ICLASS)) {
+        return rb_class_path(RBASIC(klass)->klass);
+    } else if (FL_TEST(klass, FL_SINGLETON)) {
+        VALUE attached_to = rb_ivar_get(klass, id__attached__);
+        if (RB_TYPE_P(attached_to, T_CLASS) || RB_TYPE_P(attached_to, T_MODULE)) {
+            return rb_sprintf("<singleton of %"PRIsVALUE">",
+                              build_debug_name(attached_to));
+        } else {
+            // A singleton class of a particular objec.t
+            return rb_sprintf("<instance of %"PRIsVALUE">",
+                              build_debug_name(rb_class_real(klass)));
+        }
+    } else if (!RB_TEST(rb_mod_name(klass))) {
+        // An anonymous module/class
+        // Find an actual class - every _class_ is guaranteed to be a descendant of
+        // BasicObject at least, which has a name, so we'll be able to name this
+        // _something_.
+        while (!RB_TYPE_P(klass, T_CLASS)) {
+            klass = rb_class_of(klass);
+        }
+        while (!RB_TEST(rb_mod_name(klass))) {
+            klass = rb_class_superclass(klass);
+        }
+        return rb_sprintf("<anonymous subclass of %"PRIsVALUE">",
+                          build_debug_name(klass));
+    } else {
+        return rb_class_path(klass);
+    }
+}
+
+static void
+set_mod_debug_name(VALUE klass)
+{
+    RB_OBJ_WRITE(klass, &RCLASS_EXT(klass)->debug_name, rb_fstring(build_debug_name(klass)));
+}
+
+/*
+ *  call-seq:
+ *     mod.debug_name   -> string
+ *
+ * Returns the "debug" name of a class/module. This is a string which gives a
+ * human a good understanding of what exactly the class is, including its name,
+ * what it is a singleton or refinement of, etc.
+ *
+ */
+VALUE
+rb_mod_debug_name(VALUE klass)
+{
+    VALUE r = RCLASS_EXT(klass)->debug_name;
+    if (!RB_TEST(r)) {
+        set_mod_debug_name(klass);
+        r = RCLASS_EXT(klass)->debug_name;
+    };
+    return r;
+}
+
 void
 rb_set_class_path_string(VALUE klass, VALUE under, VALUE name)
 {
@@ -240,6 +314,7 @@ rb_set_class_path_string(VALUE klass, VALUE under, VALUE name)
     if (new_name_permanent && !was_already_permanent) {
         FL_SET(klass, RCLASS_CLASSPATH_PERMANENT);
     }
+    set_mod_debug_name(klass);
 }
 
 void
@@ -3128,6 +3203,8 @@ set_namespace_path_i(ID id, VALUE v, void *payload)
     if (!FL_TEST(value, RCLASS_CLASSPATH_PERMANENT)) {
         RB_OBJ_WRITE(value, &RCLASS_EXT(value)->classpath, Qfalse);
     }
+    RB_OBJ_WRITE(value, &RCLASS_EXT(value)->tmp_classpath, Qfalse);
+    set_mod_debug_name(value);
 
     return ID_TABLE_CONTINUE;
 }
@@ -3146,6 +3223,7 @@ set_namespace_path(VALUE named_namespace, VALUE namespace_path)
     {
         RB_OBJ_WRITE(named_namespace, &RCLASS_EXT(named_namespace)->classpath, namespace_path);
         FL_SET(named_namespace, RCLASS_CLASSPATH_PERMANENT);
+        set_mod_debug_name(named_namespace);
         if (const_table) {
             rb_id_table_foreach(const_table, set_namespace_path_i, &namespace_path);
         }
