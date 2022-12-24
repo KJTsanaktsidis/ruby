@@ -193,7 +193,7 @@ profile_s_start(VALUE klass)
     rb_ivar_set(klass, rb_intern("profile_state"), state_wrapper);
 
     struct perf_helper_input req = {
-        .ruby_current_vm_ptr = (uintptr_t)GET_VM(),
+        /* .ruby_current_vm_ptr = (uintptr_t)GET_VM(), */
     };
     VALUE req_string = rb_str_new((char *)&req, sizeof(struct perf_helper_input));
     VALUE helper_fds = rb_funcall(klass, rb_intern("_get_fds_from_helper"), 1, req_string);

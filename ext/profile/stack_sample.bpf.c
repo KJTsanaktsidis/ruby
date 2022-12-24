@@ -9,8 +9,15 @@ char LICENSE[] SEC("license") = "Dual MIT/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024);
+    __uint(max_entries, STACK_SAMPLE_RINGBUF_SIZE_BYTES);
 } events SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, STACK_SAMPLE_THREAD_MAP_ENTRIES);
+    __type(key, pid_t);
+    __type(value, struct stack_sample_per_thread_data);
+} thread_pids SEC(".maps");
 
 uintptr_t ruby_current_vm_ptr = 0;
 
