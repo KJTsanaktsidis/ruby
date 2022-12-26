@@ -105,13 +105,13 @@ struct perf_helper_msg {
         } req_setup;
         struct perf_helper_res_setup { } res_setup;
         struct perf_helper_req_newthread {
-            pid_t thread_pid;
+            pid_t thread_tid;
             uintptr_t ruby_stack_ptr;
             int interval_hz;
         } req_newthread;
         struct perf_helper_res_newthread { } res_newthread;
         struct perf_helper_req_endthread {
-            pid_t thread_pid;
+            pid_t thread_tid;
         } req_endthread;
         struct perf_helper_res_endthread { } res_endthread;
     };

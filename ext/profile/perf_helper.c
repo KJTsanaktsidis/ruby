@@ -6,10 +6,12 @@
 #include <search.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
@@ -20,45 +22,8 @@
 #include "stack_sample.skel.h"
 
 #define SOCKET_FD 3
-#define PARENT_PID_FD 4
-#define PERF_GROUP_LEADER_FD 5
-#define NUM_RESPONSE_FDS 4
 
-/* A big buffer makes a bunch of truncation errors go away, and I don't really
- * care about how much memory this uses or whether or not error messages
- * get truncated */
-char error_message[512 + PATH_MAX];
-
-struct per_proc_struct {
-    bool present : 1;
-    bool tombstone : 1;
-    unsigned long hash;
-
-    pid_t pid;
-    int pidfd;
-    uintptr_t thread_stack_ptr;
-};
-
-struct proc_table_impl {
-  struct per_proc_struct *entries;
-  size_t size;
-  size_t capa;
-  size_t tombstone_count;
-};
-
-static struct state_struct {
-    int socket_fd;
-    struct ucred caller_creds;
-    uint32_t max_threads;
-    int caller_pid_fd;
-    pid_t caller_pid;
-    int perf_group_fd;
-    bool run_setup;
-    struct stack_sample_bpf *stack_sample_skel;
-    /* table of per_proc_struct, open addressing, linear probing */
-    struct proc_table_impl proc_table;
-} state;
-
+/* A normal xmalloc wrapper */
 static void *
 xmalloc(size_t n)
 {
@@ -69,29 +34,74 @@ xmalloc(size_t n)
     return r;
 }
 
+/*
+ * =============================================================================
+ * numtable hash table impl
+ * =============================================================================
+ */
+
+/* The numtable struct is a simple hashtable mapping int -> void *. It uses open
+ * addressing with linear probing, and implements deletes with tombstones.
+ * This is only nescessary because st.c can't really be used outside of the Ruby
+ * interpreter - it _appears_ to have some pre-processor support for doing this,
+ * but it no longer works it seems. */
+struct numtable {
+    struct numtable_impl {
+        struct numtable_entry {
+            bool occupied : 1;
+            bool tombstone : 1;
+            int key;
+            uintptr_t value;
+        } *entries;
+        size_t capa;
+        size_t len;
+        size_t tombstone_count;
+    } impl;
+};
+
+#define NUMTABLE_SLOT_NEW 0
+#define NUMTABLE_SLOT_EXISTING 1
+#define NUMTABLE_ITER_STOP 0
+#define NUMTABLE_ITER_CONTINUE 1
+#define NUMTABLE_NOT_FOUND 0
+#define NUMTABLE_FOUND 1
+
+static void
+numtable_init(struct numtable *tab, size_t initial_capa)
+{
+    tab->impl.capa = initial_capa;
+    tab->impl.len = 0;
+    tab->impl.tombstone_count = 0;
+    tab->impl.entries = xmalloc(sizeof(struct numtable_entry) * tab->impl.capa);
+    memset(tab->impl.entries, 0, sizeof(struct numtable_entry) * tab->impl.capa);
+}
+
+/* I copied this hash algorithm from st.c */
 static unsigned long
-hash_pid(pid_t pid)
+numtable_hash(int key)
 {
     enum {s1 = 11, s2 = 3};
-    unsigned long h = (unsigned long)((pid>>s1|(pid<<s2)) ^ (pid>>s2));
+    unsigned long h = (unsigned long)((key>>s1|(key<<s2)) ^ (key>>s2));
     return h;
 }
 
 static int
-find_proc_table_slot(struct proc_table_impl *tab, pid_t pid, struct per_proc_struct **slot_out)
+numtable_find_slot(struct numtable_impl *tab, int key, struct numtable_entry **entry_out)
 {
-    unsigned long hash = hash_pid(pid);
+    unsigned long hash = numtable_hash(key);
     size_t i = hash % tab->capa;
-    struct per_proc_struct *slot;
+    struct numtable_entry *slot;
+    /* Termination guaranteed because we ensure the load factor is < 25% at all times; so,
+     * there _MUST_ be !occupied && !tombstone slots somewhere */
     while (true) {
         slot = &tab->entries[i];
-        if (slot->present && slot->pid == pid) {
-            *slot_out = slot;
-            return 1;
+        if (slot->occupied && slot->key == key) {
+            *entry_out = slot;
+            return NUMTABLE_SLOT_EXISTING;
         }
-        if (!slot->present && !slot->tombstone) {
-            *slot_out = slot;
-            return 0;
+        if (!slot->occupied && !slot->tombstone) {
+            *entry_out = slot;
+            return NUMTABLE_SLOT_NEW;
         }
         i++;
         if (i >= tab->capa) {
@@ -101,85 +111,171 @@ find_proc_table_slot(struct proc_table_impl *tab, pid_t pid, struct per_proc_str
 }
 
 static void
-init_proc_table(void)
+numtable_grow_if_required(struct numtable *tab)
 {
-    state.proc_table.size = 0;
-    state.proc_table.capa = 16;
-    state.proc_table.tombstone_count = 0;
-    state.proc_table.entries = xmalloc(state.proc_table.capa * sizeof(struct per_proc_struct));
-}
+    if ((tab->impl.len + tab->impl.tombstone_count) * 4 <= tab->impl.capa) {
+        return;
+    }
 
-void
-grow_proc_table(void)
-{
-    struct proc_table_impl new_table;
-    new_table.capa = state.proc_table.capa * 2;
-    new_table.size = state.proc_table.size;
-    new_table.tombstone_count = 0;
-    new_table.entries = xmalloc(new_table.capa * sizeof(struct per_proc_struct));
-    memset(new_table.entries, 0, new_table.capa);
+    struct numtable_impl new_impl = { 0 };
+    struct numtable_impl *old_impl = &tab->impl;
+    new_impl.capa = old_impl->capa * 2;
+    new_impl.len = old_impl->len;
+    new_impl.tombstone_count = 0;
+    new_impl.entries = xmalloc(sizeof(struct numtable_entry) * new_impl.capa);
+    memset(new_impl.entries, 0, sizeof(struct numtable_entry) * new_impl.capa);
 
-    for (size_t i = 0; i < state.proc_table.capa; i++) {
-        struct per_proc_struct *entry = &state.proc_table.entries[i];
-        if (!entry->present) {
+    for (size_t i = 0; i < old_impl->capa; i++) {
+        if (!old_impl->entries[i].occupied) {
             continue;
         }
-        struct per_proc_struct *new_slot;
-        find_proc_table_slot(&new_table, entry->pid, &new_slot);
-        memcpy(new_slot, entry, sizeof(struct per_proc_struct));
+        struct numtable_entry *new_slot;
+        numtable_find_slot(&new_impl, old_impl->entries[i].key, &new_slot);
+        new_slot->occupied = true;
+        new_slot->tombstone = false;
+        new_slot->key = old_impl->entries[i].key;
+        new_slot->value = old_impl->entries[i].value;
     }
 
-    free(state.proc_table.entries);
-    state.proc_table = new_table;
+    free(old_impl->entries);
+    tab->impl = new_impl;
 }
 
 static int
-proc_table_insert(pid_t pid, struct per_proc_struct ent)
+numtable_get(struct numtable *tab, int key, uintptr_t *val_out)
 {
-    struct proc_table_impl *proc_table = &state.proc_table;
-    if (proc_table->size + proc_table->tombstone_count >= proc_table->capa / 2) {
-        grow_proc_table();
-        proc_table = &state.proc_table;
+    struct numtable_entry *slot;
+    int r = numtable_find_slot(&tab->impl, key, &slot);
+    if (r == NUMTABLE_SLOT_EXISTING) {
+        *val_out = slot->value;
+        return NUMTABLE_FOUND;
     }
-    struct per_proc_struct *new_slot;
-    int r = find_proc_table_slot(proc_table, pid, &new_slot);
-    if (r == 0) {
-        /* not already existing! */
-        proc_table->size++;
+    return NUMTABLE_NOT_FOUND;
+}
+
+static int
+numtable_set(struct numtable *tab, int key, uintptr_t new_val, uintptr_t *old_val)
+{
+    numtable_grow_if_required(tab);
+
+    struct numtable_entry *slot;
+    int r = numtable_find_slot(&tab->impl, key, &slot);
+    if (r == NUMTABLE_SLOT_EXISTING) {
+        if (old_val) {
+            *old_val = slot->value;
+        }
     }
-    ent.pid = pid;
-    ent.hash = hash_pid(pid);
-    ent.present = true;
-    ent.tombstone = false;
-    memcpy(new_slot, &ent, sizeof(struct per_proc_struct));
+    slot->occupied = true;
+    slot->tombstone = false;
+    slot->key = key;
+    slot->value = new_val;
     return r;
 }
 
 static int
-proc_table_delete(pid_t pid, struct per_proc_struct *ret_ent)
+numtable_delete(struct numtable *tab, int key, uintptr_t *old_val)
 {
-    struct proc_table_impl *proc_table = &state.proc_table;
-    struct per_proc_struct *found_slot;
-    int r = find_proc_table_slot(proc_table, pid, &found_slot);
-    if (r == 1) {
-        /* it existed */
-        memset(found_slot, 0, sizeof(struct per_proc_struct));
-        found_slot->present = false;
-        found_slot->tombstone = true;
-        proc_table->size--;
-        proc_table->tombstone_count++;
+    numtable_grow_if_required(tab);
+
+    struct numtable_entry *slot;
+    int r = numtable_find_slot(&tab->impl, key, &slot);
+    if (r == NUMTABLE_SLOT_EXISTING) {
+        *old_val = slot->value;
     }
+    slot->occupied = false;
+    slot->tombstone = true;
     return r;
+    
 }
+
+typedef int (*numtable_iter_func)(int key, uintptr_t val, void *ctx);
+
+static void
+numtable_each(struct numtable *tab, numtable_iter_func iter_func, void *ctx)
+{
+    for (size_t i = 0; i < tab->impl.capa; i++) {
+        struct numtable_entry *ent = &tab->impl.entries[i];
+        if (ent->occupied && !ent->tombstone) {
+            int r = iter_func(ent->key, ent->value, ctx);
+            if (r == NUMTABLE_ITER_STOP) {
+                break;
+            }
+        }
+    }
+}
+
+/*
+ * =============================================================================
+ * Helper main data structures
+ * =============================================================================
+ */
+
+#define EPOLL_FD_TYPE_SOCKET 1
+#define EPOLL_FD_TYPE_THREAD 2
+
+/* Type of data we stash in epoll */
+struct event_loop_epoll_data {
+    int fd;
+    int fd_type;
+    pid_t tid;
+};
+
+struct thread_data {
+    /* the thread being profiled */
+    pid_t tid;
+    int tid_fd;
+
+    /* perf_event_open handle for this thread */
+    int perf_fd;
+
+    /* libbpf link (attachment to perf_fd) */
+    struct bpf_link *stack_sample_attachment;
+
+    struct event_loop_epoll_data epoll_data;
+};
+
+struct prof_data {
+    int epoll_fd;       /* main run-loop epoll descriptor */
+    int socket_fd;      /* socket we communicate with the profiled process on */
+    struct event_loop_epoll_data socket_fd_epoll_data;
+    
+
+    /* Information about the process on the other side of the socket */
+    struct ucred caller_creds;  /* original creds from the socket */
+    pid_t caller_pid;           /* remote pid (actually a thread-group-id) */
+    int caller_pid_fd;          /* pidfd for pid */
+
+    /* Configuration values sent to us by the peer in the setup
+     * message */
+    uint32_t max_threads;
+
+    /* Profiling resources */
+    int perf_group_fd;  /* main perf FD that all other perf FDs are a child of */
+    struct stack_sample_bpf *stack_sample_skel; /* libbpf program handle */
+
+    /* map of per-thread struct thread_data's */
+    struct numtable thread_table;
+};
 
 #define MAX_RECEIVED_FDS 16
-struct received_message_with_ancdata {
+struct message_with_ancdata {
     struct perf_helper_msg body;
     struct ucred creds;
     bool have_creds;
     int fds[MAX_RECEIVED_FDS];
     size_t fd_count;
 };
+
+struct strbuf {
+    size_t len;
+    char str[];
+};
+
+/*
+ * =============================================================================
+ * Syscall wrappers not provided by glibc
+ * =============================================================================
+ */
 
 static int
 perf_event_open(struct perf_event_attr *hw_event, pid_t pid, int cpu,
@@ -200,29 +296,14 @@ pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned int flags)
     return syscall(SYS_pidfd_send_signal, pidfd, sig, info, flags);
 }
 
-static int
-validate_socket_peercred_matches_parent(void)
-{
-    struct ucred creds;
-    socklen_t sizeof_ucred = sizeof(struct ucred);
-    int r = getsockopt(state.socket_fd, SOL_SOCKET, SO_PEERCRED, &creds, &sizeof_ucred);
-    if (r == -1) {
-        snprintf(error_message, sizeof(error_message),
-                 "could not get percred from socket: %s", strerror(errno));
-        return -1;
-    }
-    pid_t parent_pid = getppid();
-    if (creds.pid != parent_pid) {
-        snprintf(error_message, sizeof(error_message),
-                 "socket credentials pid %d did not match parent pid %d", creds.pid, parent_pid);
-        return -1;
-    }
-    return 0;
-}
-
+/*
+ * =============================================================================
+ * Message i/o routines
+ * =============================================================================
+ */
 
 static int
-read_socket_message(struct received_message_with_ancdata *msg_with_ancdata)
+read_socket_message(int socket_fd, struct message_with_ancdata *msg_out, struct strbuf *errbuf)
 {
     union {
         struct cmsghdr align;
@@ -236,19 +317,19 @@ read_socket_message(struct received_message_with_ancdata *msg_with_ancdata)
     memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
 
     struct iovec iov;
-    iov.iov_base = &msg_with_ancdata->body;
+    iov.iov_base = &msg_out->body;
     iov.iov_len = sizeof(struct perf_helper_msg);
 
-    struct msghdr msg;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsgbuf.buf;
-    msg.msg_controllen = sizeof(cmsgbuf.buf);
-    msg.msg_flags = 0;
+    struct msghdr socket_msg;
+    socket_msg.msg_iov = &iov;
+    socket_msg.msg_iovlen = 1;
+    socket_msg.msg_control = cmsgbuf.buf;
+    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
+    socket_msg.msg_flags = 0;
 
-    int r = recvmsg(state.socket_fd, &msg, 0);
+    int r = recvmsg(socket_fd, &socket_msg, 0);
     if (r == -1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "error reading setup request message: %s", strerror(errno));
         return -1;
     }
@@ -257,40 +338,40 @@ read_socket_message(struct received_message_with_ancdata *msg_with_ancdata)
     }
 
     if (r < (int)sizeof(struct perf_helper_msg)) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "received message too small (%d bytes)", r);
         return -1;
     }
 
-    msg_with_ancdata->have_creds = false;
-    msg_with_ancdata->fd_count = 0;
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    msg_out->have_creds = false;
+    msg_out->fd_count = 0;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
     while (cmsg) {
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS) {
             if (cmsg->cmsg_len != sizeof(struct ucred)) {
-                snprintf(error_message, sizeof(error_message),
+                snprintf(errbuf->str, errbuf->len,
                          "size of SCM_CREDENTIALS message wrong (got %zu)", cmsg->cmsg_len);
                 return -1;
             }
-            memcpy(&msg_with_ancdata->creds, CMSG_DATA(cmsg), cmsg->cmsg_len);
-            msg_with_ancdata->have_creds = true;
+            memcpy(&msg_out->creds, CMSG_DATA(cmsg), cmsg->cmsg_len);
+            msg_out->have_creds = true;
         } else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
             if (cmsg->cmsg_len > MAX_RECEIVED_FDS * sizeof(int)) {
-                snprintf(error_message, sizeof(error_message),
+                snprintf(errbuf->str, errbuf->len,
                          "size of SCM_RIGHTS message too high (got %zu)", cmsg->cmsg_len);
                 return -1;
             }
-            memcpy(msg_with_ancdata->fds, CMSG_DATA(cmsg), cmsg->cmsg_len);
-            msg_with_ancdata->fd_count = cmsg->cmsg_len / sizeof(int);            
+            memcpy(msg_out->fds, CMSG_DATA(cmsg), cmsg->cmsg_len);
+            msg_out->fd_count = cmsg->cmsg_len / sizeof(int);            
         }
         
-        cmsg = CMSG_NXTHDR(&msg, cmsg);
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
     }
     return 0;
 }
 
 static int
-write_socket_message(struct received_message_with_ancdata msg_with_ancdata)
+write_socket_message(int socket_fd, struct message_with_ancdata *msg, struct strbuf *errbuf)
 {
     union {
         struct cmsghdr align;
@@ -303,36 +384,35 @@ write_socket_message(struct received_message_with_ancdata msg_with_ancdata)
     } cmsgbuf;
     memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
     struct iovec iov;
-    iov.iov_base = &msg_with_ancdata.body;
+    iov.iov_base = &msg->body;
     iov.iov_len = sizeof(struct perf_helper_msg);
 
-    struct msghdr msg;
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-    msg.msg_control = cmsgbuf.buf;
-    msg.msg_controllen = sizeof(cmsgbuf.buf);
-    msg.msg_flags = 0;
+    struct msghdr socket_msg;
+    socket_msg.msg_iov = &iov;
+    socket_msg.msg_iovlen = 1;
+    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
+    socket_msg.msg_flags = 0;
 
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
 
-    if (msg_with_ancdata.have_creds) {
+    if (msg->have_creds) {
         cmsg->cmsg_level = SOL_SOCKET;
         cmsg->cmsg_type = SCM_CREDENTIALS;
         cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
-        memcpy(CMSG_DATA(cmsg), &msg_with_ancdata.creds, sizeof(struct ucred));
-        cmsg = CMSG_NXTHDR(&msg, cmsg);
+        memcpy(CMSG_DATA(cmsg), &msg->creds, sizeof(struct ucred));
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
     }
-    if (msg_with_ancdata.fd_count > 0 && msg_with_ancdata.fd_count < MAX_RECEIVED_FDS) {
+    if (msg->fd_count > 0 && msg->fd_count < MAX_RECEIVED_FDS) {
         cmsg->cmsg_level = SOL_SOCKET;
         cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN(msg_with_ancdata.fd_count * sizeof(int));
-        memcpy(CMSG_DATA(cmsg), msg_with_ancdata.fds, cmsg->cmsg_len);
-        cmsg = CMSG_NXTHDR(&msg, cmsg);
+        cmsg->cmsg_len = CMSG_LEN(msg->fd_count * sizeof(int));
+        memcpy(CMSG_DATA(cmsg), msg->fds, cmsg->cmsg_len);
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
     }
 
-    int r = sendmsg(state.socket_fd, &msg, 0);
+    int r = sendmsg(socket_fd, &socket_msg, 0);
     if (r == -1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "sendmsg(2) failed: %s", strerror(errno));
         return -1;
     }
@@ -340,16 +420,42 @@ write_socket_message(struct received_message_with_ancdata msg_with_ancdata)
     return 0;
 }
 
-__attribute__(( format(scanf, 2, 3) ))
+/*
+ * =============================================================================
+ * PID and credential validation routines
+ * =============================================================================
+ */
+
 static int
-read_pattern_from_procfile(char *fname, const char *pattern, ...)
+validate_socket_peercred_matches_parent(int socket_fd, struct strbuf *errbuf)
+{
+    struct ucred creds;
+    socklen_t sizeof_ucred = sizeof(struct ucred);
+    int r = getsockopt(socket_fd, SOL_SOCKET, SO_PEERCRED, &creds, &sizeof_ucred);
+    if (r == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "could not get percred from socket: %s", strerror(errno));
+        return -1;
+    }
+    pid_t parent_pid = getppid();
+    if (creds.pid != parent_pid) {
+        snprintf(errbuf->str, errbuf->len,
+                 "socket credentials pid %d did not match parent pid %d", creds.pid, parent_pid);
+        return -1;
+    }
+    return 0;
+}
+
+__attribute__(( format(scanf, 2, 4) ))
+static int
+read_pattern_from_procfile(char *fname, const char *pattern, struct strbuf *errbuf, ...)
 {
     va_list args;
-    va_start(args, pattern);
+    va_start(args, errbuf);
     int ret = 0;
     FILE *f = fopen(fname, "r");
     if (f == NULL) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "error opening %s: %s", fname, strerror(errno));
         ret = -1;
         goto out;
@@ -358,7 +464,7 @@ read_pattern_from_procfile(char *fname, const char *pattern, ...)
     char linebuf[256];
     while (!feof(f)) {
         if (fgets(linebuf, sizeof(linebuf), f) == NULL) {
-          snprintf(error_message, sizeof(error_message),
+          snprintf(errbuf->str, errbuf->len,
                    "error reading file %s: %s", fname, strerror(ferror(f)));
           ret = -1;
           goto out;
@@ -380,11 +486,11 @@ out:
 }
 
 static int
-pidfd_alive(int pidfd, pid_t pidfd_pid)
+pidfd_alive(int pidfd, pid_t pidfd_pid, struct strbuf *errbuf)
 {
     if (pidfd_send_signal(pidfd, 0, NULL, 0) < 0) {
         /* means there could be pid re-use */
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "pidfd_send_signal(2) failed (pid %d exited?): %s", pidfd_pid, strerror(errno));
         return -1;
     }
@@ -393,45 +499,45 @@ pidfd_alive(int pidfd, pid_t pidfd_pid)
 }
 
 static int
-validate_pidfd_pid_matches(pid_t pid, int pidfd)
+validate_pidfd_pid_matches(pid_t pid, int pidfd, struct strbuf *errbuf)
 {
     /* First, need to find what pid this pidfd is for */
     char fname[PATH_MAX];
     snprintf(fname, sizeof(fname), "/proc/self/fdinfo/%d", pidfd);
     pid_t pidfd_pid;
-    int r = read_pattern_from_procfile(fname, "Pid: %d", &pidfd_pid);
+    int r = read_pattern_from_procfile(fname, "Pid: %d", errbuf, &pidfd_pid);
     if (r == -1) {
         return r;
     } else if (r == 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "Pid: line not in %s (not a pidfd?)", fname);
         return -1;
     }
 
     if (pidfd_pid != pid) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "ucreds pid (%d) did not match pidfd pid (%d)", pid, pidfd_pid);
         return -1;
     }
 
-    if (pidfd_alive(pidfd, pidfd_pid) == -1) {
+    if (pidfd_alive(pidfd, pidfd_pid, errbuf) == -1) {
         return -1;
     }
     return 0;
 }
 
 static int
-validate_creds_match(struct ucred creds)
+validate_creds_match_self(struct ucred creds, struct strbuf *errbuf)
 {
     uid_t uid = getuid();
     if (creds.uid != uid) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "uid does not match requester (%u vs %u)", creds.uid, uid);
         return -1;
     }
     uid_t gid = getuid();
     if (creds.gid != gid) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "gid does not match requester (%u vs %u)", creds.gid, gid);
         return -1;
     }
@@ -439,50 +545,82 @@ validate_creds_match(struct ucred creds)
 }
 
 static int
-get_thread_tgid(pid_t pid, pid_t *tgid_out)
+get_thread_tgid(pid_t pid, pid_t *tgid_out, struct strbuf *errbuf)
 {
     char status_fname[PATH_MAX];
     snprintf(status_fname, sizeof(status_fname), "/proc/%d/status", pid);
-    int r = read_pattern_from_procfile(status_fname, "Tgid: %d", tgid_out);
+    int r = read_pattern_from_procfile(status_fname, "Tgid: %d", errbuf, tgid_out);
     if (r == -1) {
         return -1;
     } else if (r == 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "no Tgid line in %s", status_fname);
         return -1;
     }
     return 0;
 }
 
+/*
+ * =============================================================================
+ * Main message handling functions
+ * =============================================================================
+ */
+
 static int
-handle_message_setup(struct received_message_with_ancdata msg)
+handle_thread_exit(struct prof_data *state, pid_t tid, struct strbuf *errbuf)
 {
-    int ret = -1;
+    uintptr_t th_data_entry;
+    int r = numtable_delete(&state->thread_table, tid, &th_data_entry);
+    if (r == NUMTABLE_SLOT_NEW) {
+        /* it wasn't in here?? */
+        return 0;
+    }
+    struct thread_data *thdata = (struct thread_data *)th_data_entry;
+    if (thdata->stack_sample_attachment) {
+        bpf_link__detach(thdata->stack_sample_attachment);
+    }
+    if (thdata->perf_fd != -1) {
+        close(thdata->perf_fd);
+    }
+    if (thdata->tid_fd != -1) {
+        epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, thdata->tid_fd, NULL);
+        close(thdata->tid_fd);
+    }
+    bpf_map__delete_elem(state->stack_sample_skel->maps.thread_data, &tid, sizeof(pid_t), 0);
+    free(thdata);
+    return 0;
+}
+
+static int
+handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
+{
+    int ret;
     int dummy_fd = -1;
+    int caller_pid_fd = -1;
     struct stack_sample_bpf *stack_sample_skel = NULL;
 
     /* Validate the credentials present in the message */
     if (!msg.have_creds) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "did not receive SCM_CREDENTIALS message");
         ret = -1;
         goto out;
     }
     if (msg.fd_count != 1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "received wrong number of FDs (got %zu)", msg.fd_count);
         ret = -1;
         goto out;
     }
-    int caller_pid_fd = msg.fds[0];
+    caller_pid_fd = msg.fds[0];
     /* validate that the pidfd we got really is for the caller's pid, and that it's still live
      * and thus that there has been no pid reuse */
-    if (validate_pidfd_pid_matches(msg.creds.pid, caller_pid_fd) == -1) {
+    if (validate_pidfd_pid_matches(msg.creds.pid, caller_pid_fd, errbuf) == -1) {
         ret = -1;
         goto out;
     }
     /* also validate uid/gid are the same - this _should_ be a no-op */
-    if (validate_creds_match(msg.creds) == -1) {
+    if (validate_creds_match_self(msg.creds, errbuf) == -1) {
         ret = -1;
         goto out;
     }
@@ -498,7 +636,7 @@ handle_message_setup(struct received_message_with_ancdata msg)
     dummy_attr.freq = 1;
     dummy_fd = perf_event_open(&dummy_attr, msg.creds.pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (dummy_fd == -1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "perf_event_open(2) for dummy event failed: %s", strerror(errno));
         ret = -1;
         goto out;
@@ -507,7 +645,7 @@ handle_message_setup(struct received_message_with_ancdata msg)
     /* need to re-validate that the pid we just bound dummy_fd to is the same one we had
      * the pidfd for, and not re-used, by checking the pidfd is still alive */
     if (pidfd_send_signal(caller_pid_fd, 0, NULL, 0) < 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "pidfd_send_signal(2) failed (pid %d exited?): %s", msg.creds.pid, strerror(errno));
         ret = -1;
         goto out;
@@ -515,39 +653,43 @@ handle_message_setup(struct received_message_with_ancdata msg)
 
     stack_sample_skel = stack_sample_bpf__open_and_load();
     if (stack_sample_skel == NULL) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "failed to open stack sample bpf program: %s", strerror(errno));
         ret = -1;
         goto out;
     }
 
-    int r = bpf_map__set_max_entries(stack_sample_skel->maps.thread_pids, msg.body.req_setup.max_threads);
+    int r = bpf_map__set_max_entries(stack_sample_skel->maps.thread_data, msg.body.req_setup.max_threads);
     if (r < 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "failed to resize thread_pids bpf map: %s", strerror(-r));
         ret = -1;
         goto out;
     }
 
-    /* move all resources over to state so they don't get freed */
-    state.perf_group_fd = dummy_fd;
+    /* move all resources over to state so they don't get freed by
+     * the out: block below. */
+    state->perf_group_fd = dummy_fd;
     dummy_fd = -1;
-    state.caller_pid_fd = caller_pid_fd;
+    state->caller_pid_fd = caller_pid_fd;
     caller_pid_fd = -1;
-    state.stack_sample_skel = stack_sample_skel;
+    state->stack_sample_skel = stack_sample_skel;
     stack_sample_skel = NULL;
-    state.max_threads = msg.body.req_setup.max_threads;
+    state->max_threads = msg.body.req_setup.max_threads;
+    state->caller_creds = msg.creds;
+    state->caller_pid = msg.creds.pid;
 
-    struct received_message_with_ancdata res = { 0 };
+    struct message_with_ancdata res = { 0 };
     res.body.type = PERF_HELPER_MSG_RES_SETUP;
     res.fd_count = 2;
-    res.fds[0] = state.perf_group_fd;
-    res.fds[1] = bpf_map__fd(state.stack_sample_skel->maps.events);
-    r = write_socket_message(res);
+    res.fds[0] = state->perf_group_fd;
+    res.fds[1] = bpf_map__fd(state->stack_sample_skel->maps.events);
+    r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
         ret = -1;
         goto out;
     }
+    ret = 0;
 
 out:
     if (stack_sample_skel) {
@@ -563,15 +705,16 @@ out:
 }
 
 static int
-handle_message_newthread(struct received_message_with_ancdata msg)
+handle_message_newthread(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
 {
-    int ret = 0;
+    int ret;
     int thread_pidfd = -1;
     int perf_fd = -1;
+    pid_t thread_tid = 0;
     struct bpf_link *stack_sample_link = NULL;
 
     if (msg.fd_count != 1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "received wrong number of FDs (got %zu)", msg.fd_count);
         ret = -1;
         goto out;
@@ -579,26 +722,35 @@ handle_message_newthread(struct received_message_with_ancdata msg)
     thread_pidfd = msg.fds[0];
 
     /* validate that the pidfd == the pid we were given */
-    pid_t thread_pid = msg.body.req_newthread.thread_pid;
-    if (validate_pidfd_pid_matches(thread_pidfd, thread_pid) == -1) {
+    thread_tid = msg.body.req_newthread.thread_tid;
+    if (validate_pidfd_pid_matches(thread_pidfd, thread_tid, errbuf) == -1) {
         ret = -1;
         goto out;
     }
 
     /* verify that this thread belongs to the same process as we're connected to */
     pid_t thread_tgid;
-    if (get_thread_tgid(thread_pid, &thread_tgid) == -1) {
+    if (get_thread_tgid(thread_tid, &thread_tgid, errbuf) == -1) {
         ret = -1;
         goto out;
     }
 
-    if (thread_tgid != state.caller_creds.pid) {
-        snprintf(error_message, sizeof(error_message),
+    if (thread_tgid != state->caller_pid) {
+        snprintf(errbuf->str, errbuf->len,
                  "thread belongs to a different process (%d, expected %d)",
-                 thread_tgid, state.caller_creds.pid);
+                 thread_tgid, state->caller_pid);
         ret = -1;
         goto out;
     }
+
+    /* Check if we already have an entry in progress for this pid; if so, close
+     * it off. handle_thread_exit will successfully do nothing if we didn't already
+     * know about thread_pid. */
+    int r = handle_thread_exit(state, thread_tid, errbuf);
+    if (r == -1) {
+        ret = -1;
+        goto out;
+    } 
 
     struct perf_event_attr perf_attr = { 0 };
     perf_attr.size = sizeof(struct perf_event_attr);
@@ -606,44 +758,84 @@ handle_message_newthread(struct received_message_with_ancdata msg)
     perf_attr.config = PERF_COUNT_SW_TASK_CLOCK;
     perf_attr.sample_freq = msg.body.req_newthread.interval_hz;
     perf_attr.freq = 1;
-    perf_fd = perf_event_open(&perf_attr, thread_pid, -1, state.perf_group_fd, PERF_FLAG_FD_CLOEXEC);
+    perf_fd = perf_event_open(&perf_attr, thread_tid, -1, state->perf_group_fd, PERF_FLAG_FD_CLOEXEC);
     if (perf_fd == -1) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "perf_event_open(2) for dummy event failed: %s", strerror(errno));
         ret = -1;
         goto out;
     }
+
+    /* check for pid re-use */
+    if (pidfd_alive(thread_pidfd, thread_tid, errbuf) == -1) {
+        ret = -1;
+        goto out;
+    }
     
-    stack_sample_link = bpf_program__attach_perf_event(state.stack_sample_skel->progs.stack_sample, perf_fd);
+    stack_sample_link = bpf_program__attach_perf_event(state->stack_sample_skel->progs.stack_sample, perf_fd);
     if (!stack_sample_link) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "bpf attach failed: %s", strerror(errno));
         ret = -1;
         goto out;
     }
 
-    struct stack_sample_per_thread_data map_data;
-    map_data.pid = thread_pid;
+
+    struct stack_sample_thread_data map_data;
+    map_data.pid = thread_tid;
     map_data.ruby_stack_ptr = msg.body.req_newthread.ruby_stack_ptr;
-    int r = bpf_map__update_elem(state.stack_sample_skel->maps.thread_pids,
-                                 &thread_pid, sizeof(pid_t),
-                                 &map_data, sizeof(struct stack_sample_per_thread_data),
-                                 0);
+    r = bpf_map__update_elem(state->stack_sample_skel->maps.thread_data, &thread_tid, sizeof(pid_t),
+                             &map_data, sizeof(struct stack_sample_thread_data),
+                             0);
     if (r < 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "failed to update ebpf map: %s", strerror(-r));
         ret = -1;
         goto out;
       }
 
-    /* check for pid re-use */
-    if (pidfd_alive(thread_pidfd, thread_pid) == -1) {
+
+    struct thread_data *thdata = xmalloc(sizeof(struct thread_data));
+    struct epoll_event ev;
+    thdata->epoll_data.fd = thread_pidfd;
+    thdata->epoll_data.tid = thread_tid;
+    thdata->epoll_data.fd_type = EPOLL_FD_TYPE_THREAD;
+    ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+    ev.data.ptr = &thdata->epoll_data;
+    r = epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, thdata->tid_fd, &ev);
+    if (r == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "failed to epoll_ctl add pidfd: %s", strerror(errno));
         ret = -1;
+        free(thdata);
         goto out;
     }
 
-    /* If we got here, save to */
+    /* If we got here, save the FDs and null them out so they don't get closed
+     * by the out: block */
+    thdata->tid = thread_tid;
+    thdata->tid_fd = thread_pidfd;
+    thread_pidfd = -1;
+    thdata->perf_fd = perf_fd;
+    perf_fd = -1;
+    thdata->stack_sample_attachment = stack_sample_link;
+    stack_sample_link = NULL;
+    numtable_set(&state->thread_table, thread_tid, (uintptr_t)thdata, NULL);
+
+    /* Send the response message */
+    struct message_with_ancdata res = { 0 };
+    res.body.type = PERF_HELPER_MSG_RES_NEWTHREAD;
+    r = write_socket_message(state->socket_fd, &res, errbuf);
+    if (r == -1) {
+        ret = -1;
+        goto out;
+    }
+    ret = 0;
 out:
+    if (ret == -1 && thread_tid != 0) {
+        /* on error, ensure we removed any pid we added to the bpf map */
+        bpf_map__delete_elem(state->stack_sample_skel->maps.thread_data, &thread_tid, sizeof(pid_t), 0);
+    }
     if (stack_sample_link) {
         bpf_link__detach(stack_sample_link);
     }
@@ -657,58 +849,168 @@ out:
 }
 
 static int
-handle_message_endthread(struct received_message_with_ancdata msg)
+handle_message_endthread(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
 {
     if (msg.fd_count != 0) {
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "received wrong number of FDs (got %zu)", msg.fd_count);
         return -1;
     }
-    
+
+    int r = handle_thread_exit(state, msg.body.req_endthread.thread_tid, errbuf);
+    if (r == -1) {
+        return -1;
+    }
+
+    struct message_with_ancdata res = { 0 };
+    res.body.type = PERF_HELPER_MSG_RES_ENDTHREAD;
+    r = write_socket_message(state->socket_fd, &res, errbuf);
+    if (r == -1) {
+        return -1;
+    }
     return 0;
-    
 }
 
 static int
-handle_message(struct received_message_with_ancdata msg)
+handle_message(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
 {
     switch (msg.body.type) {
       case PERF_HELPER_MSG_REQ_SETUP:
-        return handle_message_setup(msg);
+        return handle_message_setup(state, msg, errbuf);
       case PERF_HELPER_MSG_REQ_NEWTHREAD:
-        return handle_message_newthread(msg);
+        return handle_message_newthread(state, msg, errbuf);
       case PERF_HELPER_MSG_REQ_ENDTHREAD:
-        return handle_message_endthread(msg);
+        return handle_message_endthread(state, msg, errbuf);
       default:
-        snprintf(error_message, sizeof(error_message),
+        snprintf(errbuf->str, errbuf->len,
                  "unknown received message type %d", msg.body.type);
         return -1;
     }
 }
 
-static void
-init_state(void)
+/*
+ * =============================================================================
+ * Event loop handling
+ * =============================================================================
+ */
+
+static int
+setup_event_loop(struct prof_data *state, struct strbuf *errbuf)
 {
-    memset(&state, 0, sizeof(state));
-    state.socket_fd = -1;
-    state.caller_pid_fd = -1;
-    state.perf_group_fd = -1;
-    init_proc_table();
+    /* event loop fd */
+    state->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (state->epoll_fd == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "failed to call epoll_create1(2): %s", strerror(errno));
+        return -1;
+    }
+    /* The unix socketpair we listen on needs to be passed in as FD 3 */
+    state->socket_fd = SOCKET_FD;
+    state->socket_fd_epoll_data.fd = state->socket_fd;
+    state->socket_fd_epoll_data.fd_type = EPOLL_FD_TYPE_SOCKET;
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+    ev.data.ptr = &state->socket_fd_epoll_data;
+    int r = epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, state->socket_fd, &ev);
+    if (r == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "failed to arm socket_fd with epoll_ctl(2): %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int
+run_event_loop(struct prof_data *state, struct strbuf *errbuf)
+{
+    while (true) {
+        struct epoll_event event;
+        int r = epoll_wait(state->epoll_fd, &event, 1, -1);
+        if (r == -1) {
+            snprintf(errbuf->str, errbuf->len,
+                     "failed to poll epoll_wait(2): %s", strerror(errno));
+            return -1;
+        }
+
+        /* What fd fired? */
+        struct event_loop_epoll_data *evdata = event.data.ptr;
+        struct message_with_ancdata msg;
+        switch (evdata->fd_type) {
+          case EPOLL_FD_TYPE_SOCKET:
+            /* handle message on main socket */
+            r = read_socket_message(evdata->fd, &msg, errbuf);
+            if (r == -1) {
+                return -1;
+            } 
+            r = handle_message(state, msg, errbuf);
+            if (r == -1) {
+                return -1;
+            }
+            break;
+          case EPOLL_FD_TYPE_THREAD:
+            /* a thread we were following exited */
+            r = handle_thread_exit(state, evdata->tid, errbuf);
+            if (r == -1) {
+                return -1;
+            }
+            break;
+        }
+    }
+    return 0;
+}
+
+/*
+ * =============================================================================
+ * Main function & friends
+ * =============================================================================
+ */
+
+static void
+init_state(struct prof_data *state)
+{
+    memset(state, 0, sizeof(struct prof_data));
+    state->epoll_fd = -1;
+    state->socket_fd = -1;
+    state->caller_pid_fd = -1;
+    state->perf_group_fd = -1;
+    numtable_init(&state->thread_table, 16);
+}
+
+static int 
+cleanup_thread_state_iter(int key, uintptr_t val, void *ctx)
+{
+    struct thread_data *data = (struct thread_data *)val;
+    if (data->stack_sample_attachment) {
+        bpf_link__detach(data->stack_sample_attachment);
+    }
+    if (data->perf_fd != -1) {
+        close(data->perf_fd);
+    }
+    if (data->tid_fd != -1) {
+        close(data->tid_fd);
+    }
+    free(data);
+    return NUMTABLE_ITER_CONTINUE;
 }
 
 static void
-cleanup_state(void)
+cleanup_state(struct prof_data *state)
 {
-    if (state.stack_sample_skel) {
-        stack_sample_bpf__destroy(state.stack_sample_skel);
+    numtable_each(&state->thread_table, cleanup_thread_state_iter, NULL);
+    if (state->stack_sample_skel) {
+        stack_sample_bpf__destroy(state->stack_sample_skel);
     }
-    if (state.perf_group_fd != -1) {
-        close(state.perf_group_fd);
+    if (state->perf_group_fd != -1) {
+        close(state->perf_group_fd);
     }
-    if (state.caller_pid_fd != -1) {
-        close(state.caller_pid_fd);
+    if (state->caller_pid_fd != -1) {
+        close(state->caller_pid_fd);
+    }
+    if (state->epoll_fd != -1) {
+        close(state->epoll_fd);
     }
 }
+
 
 int
 main(int argc, char **argv)
@@ -725,72 +1027,40 @@ main(int argc, char **argv)
     close(STDOUT_FILENO);
     /* Don't need SIGPIPE, we'll find out that the socket is closed by error handling */
     signal(SIGPIPE, SIG_IGN);
-    /* Zero out our state structure */
-    init_state();
 
-    /* The unix socketpair we listen on needs to be passed in as FD 3 */
-    state.socket_fd = SOCKET_FD;
-    
+    /* Zero out our state structure */
+    struct prof_data state;
+    init_state(&state);
+    struct strbuf *errbuf = alloca(sizeof(struct strbuf) + 512);
+    errbuf->len = 512;
+    errbuf->str[0] = '\0';
+
+    /* Sets up our event loop infrastructure */
+    if (setup_event_loop(&state, errbuf) == -1) {
+        fprintf(stderr, "%s\n", errbuf->str);
+        exit(1);
+    }
+
     /* This check is not strictly speaking needed, but included in the interests of defence
      * in depth. Ensure that the socket we received was actually bound by our parent process.
      * Note that this is not at all a sufficient check on its own because if our parent process
      * had a socket pair that came e.g. from init (pid1), and promptly exited after forking us,
      * we might conclude that our parent (init) owns the socket and all is OK */
-    if (validate_socket_peercred_matches_parent() == -1) {
-        fprintf(stderr, "%s\n", error_message);
+    if (validate_socket_peercred_matches_parent(state.socket_fd, errbuf) == -1) {
+        fprintf(stderr, "%s\n", errbuf->str);
         exit(1);
     }
 
-    while (true) {
-        struct received_message_with_ancdata msg;
-        int r = read_socket_message(&msg);
-        if (r == 0) {
-            /* orderly shutdown of the socket */
-            cleanup_state();
-            exit(0);
-        } else if (r == -1) {
-            fprintf(stderr, "%s\n", error_message);
-            exit(1);
-        }
-        r = handle_message(msg);
-        if (r == -1) {
-            fprintf(stderr, "%s\n", error_message);
-            exit(1);
-        }
+    /* Loop waiting for messages or closed processes */
+    int ret;
+    if (run_event_loop(&state, errbuf) == -1) {
+        fprintf(stderr, "%s\n", errbuf->str);
+        ret = 1;
+    } else {
+        ret = 0;
     }
 
-/*
-    struct perf_event_attr swclock_attr = { 0 };
-    swclock_attr.size = sizeof(struct perf_event_attr);
-    swclock_attr.type = PERF_TYPE_SOFTWARE;
-    swclock_attr.config = PERF_COUNT_SW_TASK_CLOCK;
-    swclock_attr.sample_freq = 50;
-    swclock_attr.freq = 1;
-    swclock_attr.precise_ip = 2;
-    swclock_attr.disabled = 1;
-    int swclock_fd = perf_event_open(&swclock_attr, profile_pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
- 
-    struct stack_sample_bpf *stack_sample_skel = stack_sample_bpf__open_and_load();
-    if (!stack_sample_skel) {
-        fprintf(stderr, "stack_sample_bpf__open_and_load() failed: %s\n", strerror(errno));
-        exit(1);
-    }
-
-    struct bpf_link *stack_sample_link =
-        bpf_program__attach_perf_event(stack_sample_skel->progs.stack_sample, swclock_fd);
-    if (!stack_sample_link) {
-        fprintf(stderr, "bpf_program__attach_pref_event() failed: %s\n", strerror(errno));
-        exit(1);
-    }
-
-    int fds[NUM_RESPONSE_FDS] = {
-        swclock_fd,
-        bpf_map__fd(stack_sample_skel->maps.events),
-        bpf_link__fd(stack_sample_link),
-        bpf_program__fd(stack_sample_skel->progs.stack_sample),
-    };
-
-    send_response_msg(fds);
- */   
+    cleanup_state(&state);
+    exit(ret);
     return 0;
 }

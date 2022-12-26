@@ -6,12 +6,13 @@
 
 struct stack_sample_entry {
     __u32 pid;
+    __u32 tid;
     __u32 cpu_id;
     __u64 sample_period;
-    __u64 vm_value;
+    __u64 stack_ptr;
 };
 
-struct stack_sample_per_thread_data {
+struct stack_sample_thread_data {
     pid_t pid;
     uintptr_t ruby_stack_ptr;
 };
