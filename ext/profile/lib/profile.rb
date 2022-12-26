@@ -6,9 +6,16 @@ require 'stringio'
 require 'open3'
 require 'io/nonblock'
 
-class Profile
-  def self._find_perf_helper
-    $LOAD_PATH.map { File.join(_1, "perf_helper#{RbConfig::CONFIG['EXEEXT']}") }.find { File.exist? _1 }
+module Profile
+
+  def perf_helper_binary
+    @perf_helper_binary ||= $LOAD_PATH.map {
+      File.join(_1, "perf_helper#{RbConfig::CONFIG['EXEEXT']}")
+    }.find { File.exist? _1 }
+  end
+
+  class Session
+    
   end
 
   def self._get_fds_from_helper(req_str)

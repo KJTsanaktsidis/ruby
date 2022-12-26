@@ -6,7 +6,8 @@ $INCFLAGS << ' -I$(topdir) -I$(top_srcdir)'
 $VPATH << '$(topdir)' << '$(top_srcdir)'
 $defs << '-D_GNU_SOURCE'
 $objs = [
-  "profile.#{$OBJEXT}"
+  "profile.#{$OBJEXT}",
+  "profile_session.#{$OBJEXT}"
 ]
 
 have_library 'bpf'
