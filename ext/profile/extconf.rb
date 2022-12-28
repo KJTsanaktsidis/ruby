@@ -11,7 +11,7 @@ $objs = [
 ]
 
 have_library 'bpf'
-
+append_cflags '-fvisibility=hidden'
 create_header
 create_makefile('profile') do |mk|
   mk << <<~MAKEFILE

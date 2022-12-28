@@ -3,7 +3,8 @@
 
 #include <ruby.h>
 
-extern VALUE rb_cProfile;
+extern VALUE cProfile;
+extern VALUE rb_cSocket;
 
 #endif
 
