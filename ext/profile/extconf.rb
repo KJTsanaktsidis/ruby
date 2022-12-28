@@ -7,7 +7,8 @@ $VPATH << '$(topdir)' << '$(top_srcdir)'
 $defs << '-D_GNU_SOURCE'
 $objs = [
   "profile.#{$OBJEXT}",
-  "profile_session.#{$OBJEXT}"
+  "profile_session.#{$OBJEXT}",
+  "perf_helper_proxy.#{$OBJEXT}"
 ]
 
 have_library 'bpf'

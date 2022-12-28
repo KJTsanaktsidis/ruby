@@ -4,7 +4,6 @@
 #include <ruby.h>
 
 extern VALUE cProfile;
-extern VALUE rb_cSocket;
 
 #endif
 

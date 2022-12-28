@@ -19,7 +19,6 @@
 #include "stack_sample.bpf.h"
 
 VALUE cProfile;
-VALUE rb_cSocket;
 VALUE rb_cProfileState;
 
 struct native_profile_thread_state {
@@ -255,9 +254,6 @@ __attribute__((visibility("default")))
 void
 Init_profile(void)
 {
-    rb_require("socket");
-    rb_cSocket = rb_const_get(rb_cObject, rb_intern("Socket"));
-
     cProfile = rb_define_class_under(rb_cObject, "Profile", rb_cObject);
     rb_undef_alloc_func(cProfile);
     rb_cProfileState = rb_define_class_under(cProfile, "State", rb_cObject);
@@ -267,4 +263,6 @@ Init_profile(void)
                                profile_s_start, 0);
     rb_define_singleton_method(cProfile, "stop",
                                profile_s_stop, 0);
-    init_profile_session(); }
+    init_perf_helper_proxy();
+    init_profile_session();
+}
