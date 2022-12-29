@@ -826,7 +826,10 @@ run_event_loop(struct prof_data *state, struct strbuf *errbuf)
             r = read_socket_message(evdata->fd, &msg, errbuf);
             if (r == -1) {
                 return -1;
-            } 
+            } else if (r == 0) {
+                /* ?? no message was available in the end ?? */
+                break;
+            }
             r = handle_message(state, msg, errbuf);
             if (r == -1) {
                 return -1;

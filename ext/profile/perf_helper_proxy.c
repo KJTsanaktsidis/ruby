@@ -423,7 +423,9 @@ poll_reap_process(struct PerfHelperProxy *proxy, char *errbuf, size_t errbuf_len
 
 /* Receives any pending response from the socket shared with the perf_helper binary */
 static int
-poll_message_socket(struct PerfHelperProxy *proxy, char *errbuf, size_t errbuf_len)
+poll_message_socket(struct PerfHelperProxy *proxy,
+                    struct perf_helper_proxy_event *event_out,
+                    char *errbuf, size_t errbuf_len)
 {
     return 0;
 }
@@ -439,7 +441,7 @@ poll_message_socket(struct PerfHelperProxy *proxy, char *errbuf, size_t errbuf_l
 int
 pref_helper_proxy_poll_event(struct PerfHelperProxy *proxy,
                              struct perf_helper_proxy_event *event_out,
-                               char *errbuf, size_t errbuf_len)
+                             char *errbuf, size_t errbuf_len)
 {
     int did_reap = poll_reap_process(proxy, errbuf, errbuf_len);
     if (did_reap == -1) {
