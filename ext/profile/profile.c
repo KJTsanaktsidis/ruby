@@ -13,7 +13,6 @@
 
 #include "vm_core.h"
 
-#include "perf_helper.h"
 #include "profile.h"
 #include "profile_session.h"
 #include "stack_sample.bpf.h"
@@ -40,6 +39,14 @@ struct native_profile_thread_state {
 
     int ret;
     char errbuf[256];
+};
+
+struct perf_helper_input {
+    bool group_leader_init;
+    pid_t thread_tid;
+    uintptr_t thread_value;
+    uintptr_t stack_ptr_addr;
+    uintptr_t stack_top;
 };
 
 static void

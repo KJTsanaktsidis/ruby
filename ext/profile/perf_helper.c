@@ -17,9 +17,9 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "perf_helper.h"
 #include "stack_sample.bpf.h"
 #include "stack_sample.skel.h"
+#include "perf_helper_message.h"
 
 #define SOCKET_FD 3
 
@@ -257,15 +257,6 @@ struct prof_data {
     struct numtable thread_table;
 };
 
-#define MAX_RECEIVED_FDS 16
-struct message_with_ancdata {
-    struct perf_helper_msg body;
-    struct ucred creds;
-    bool have_creds;
-    int fds[MAX_RECEIVED_FDS];
-    size_t fd_count;
-};
-
 struct strbuf {
     size_t len;
     char str[];
@@ -303,121 +294,15 @@ pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned int flags)
  */
 
 static int
-read_socket_message(int socket_fd, struct message_with_ancdata *msg_out, struct strbuf *errbuf)
+read_socket_message(int socket_fd, struct perf_helper_msg *msg_out, struct strbuf *errbuf)
 {
-    union {
-        struct cmsghdr align;
-        char buf[
-          /* space for a SCM_CREDENTIALS message */
-          CMSG_SPACE(sizeof(struct ucred)) +
-          /* space for SCM_RIGHTS */
-          CMSG_SPACE(MAX_RECEIVED_FDS * sizeof(int))
-        ];
-    } cmsgbuf;
-    memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
-
-    struct iovec iov;
-    iov.iov_base = &msg_out->body;
-    iov.iov_len = sizeof(struct perf_helper_msg);
-
-    struct msghdr socket_msg;
-    socket_msg.msg_iov = &iov;
-    socket_msg.msg_iovlen = 1;
-    socket_msg.msg_control = cmsgbuf.buf;
-    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
-    socket_msg.msg_flags = 0;
-
-    int r = recvmsg(socket_fd, &socket_msg, 0);
-    if (r == -1) {
-        snprintf(errbuf->str, errbuf->len,
-                 "error reading setup request message: %s", strerror(errno));
-        return -1;
-    }
-    if (r == 0) {
-        return 0;
-    }
-
-    if (r < (int)sizeof(struct perf_helper_msg)) {
-        snprintf(errbuf->str, errbuf->len,
-                 "received message too small (%d bytes)", r);
-        return -1;
-    }
-
-    msg_out->have_creds = false;
-    msg_out->fd_count = 0;
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
-    while (cmsg) {
-        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS) {
-            if (cmsg->cmsg_len != sizeof(struct ucred)) {
-                snprintf(errbuf->str, errbuf->len,
-                         "size of SCM_CREDENTIALS message wrong (got %zu)", cmsg->cmsg_len);
-                return -1;
-            }
-            memcpy(&msg_out->creds, CMSG_DATA(cmsg), cmsg->cmsg_len);
-            msg_out->have_creds = true;
-        } else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            if (cmsg->cmsg_len > MAX_RECEIVED_FDS * sizeof(int)) {
-                snprintf(errbuf->str, errbuf->len,
-                         "size of SCM_RIGHTS message too high (got %zu)", cmsg->cmsg_len);
-                return -1;
-            }
-            memcpy(msg_out->fds, CMSG_DATA(cmsg), cmsg->cmsg_len);
-            msg_out->fd_count = cmsg->cmsg_len / sizeof(int);            
-        }
-        
-        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
-    }
-    return 0;
+    return read_perf_helper_message(socket_fd, msg_out, errbuf->str, errbuf->len);
 }
 
 static int
-write_socket_message(int socket_fd, struct message_with_ancdata *msg, struct strbuf *errbuf)
+write_socket_message(int socket_fd, struct perf_helper_msg *msg, struct strbuf *errbuf)
 {
-    union {
-        struct cmsghdr align;
-        char buf[
-          /* space for a SCM_CREDENTIALS message */
-          CMSG_SPACE(sizeof(struct ucred)) +
-          /* space for SCM_RIGHTS */
-          CMSG_SPACE(MAX_RECEIVED_FDS * sizeof(int))
-        ];
-    } cmsgbuf;
-    memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
-    struct iovec iov;
-    iov.iov_base = &msg->body;
-    iov.iov_len = sizeof(struct perf_helper_msg);
-
-    struct msghdr socket_msg;
-    socket_msg.msg_iov = &iov;
-    socket_msg.msg_iovlen = 1;
-    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
-    socket_msg.msg_flags = 0;
-
-    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
-
-    if (msg->have_creds) {
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_CREDENTIALS;
-        cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
-        memcpy(CMSG_DATA(cmsg), &msg->creds, sizeof(struct ucred));
-        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
-    }
-    if (msg->fd_count > 0 && msg->fd_count < MAX_RECEIVED_FDS) {
-        cmsg->cmsg_level = SOL_SOCKET;
-        cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN(msg->fd_count * sizeof(int));
-        memcpy(CMSG_DATA(cmsg), msg->fds, cmsg->cmsg_len);
-        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
-    }
-
-    int r = sendmsg(socket_fd, &socket_msg, 0);
-    if (r == -1) {
-        snprintf(errbuf->str, errbuf->len,
-                 "sendmsg(2) failed: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
+    return write_perf_helper_message(socket_fd, msg, errbuf->str, errbuf->len);
 }
 
 /*
@@ -592,7 +477,7 @@ handle_thread_exit(struct prof_data *state, pid_t tid, struct strbuf *errbuf)
 }
 
 static int
-handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
+handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
     int ret;
     int dummy_fd = -1;
@@ -600,27 +485,27 @@ handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, s
     struct stack_sample_bpf *stack_sample_skel = NULL;
 
     /* Validate the credentials present in the message */
-    if (!msg.have_creds) {
+    if (!msg.ancdata.have_creds) {
         snprintf(errbuf->str, errbuf->len,
                  "did not receive SCM_CREDENTIALS message");
         ret = -1;
         goto out;
     }
-    if (msg.fd_count != 1) {
+    if (msg.ancdata.fd_count != 1) {
         snprintf(errbuf->str, errbuf->len,
-                 "received wrong number of FDs (got %zu)", msg.fd_count);
+                 "received wrong number of FDs (got %zu)", msg.ancdata.fd_count);
         ret = -1;
         goto out;
     }
-    caller_pid_fd = msg.fds[0];
+    caller_pid_fd = msg.ancdata.fds[0];
     /* validate that the pidfd we got really is for the caller's pid, and that it's still live
      * and thus that there has been no pid reuse */
-    if (validate_pidfd_pid_matches(msg.creds.pid, caller_pid_fd, errbuf) == -1) {
+    if (validate_pidfd_pid_matches(msg.ancdata.creds.pid, caller_pid_fd, errbuf) == -1) {
         ret = -1;
         goto out;
     }
     /* also validate uid/gid are the same - this _should_ be a no-op */
-    if (validate_creds_match_self(msg.creds, errbuf) == -1) {
+    if (validate_creds_match_self(msg.ancdata.creds, errbuf) == -1) {
         ret = -1;
         goto out;
     }
@@ -634,7 +519,7 @@ handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, s
     dummy_attr.config = PERF_COUNT_SW_DUMMY;
     dummy_attr.sample_freq = 1;
     dummy_attr.freq = 1;
-    dummy_fd = perf_event_open(&dummy_attr, msg.creds.pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
+    dummy_fd = perf_event_open(&dummy_attr, msg.ancdata.creds.pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (dummy_fd == -1) {
         snprintf(errbuf->str, errbuf->len,
                  "perf_event_open(2) for dummy event failed: %s", strerror(errno));
@@ -646,7 +531,7 @@ handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, s
      * the pidfd for, and not re-used, by checking the pidfd is still alive */
     if (pidfd_send_signal(caller_pid_fd, 0, NULL, 0) < 0) {
         snprintf(errbuf->str, errbuf->len,
-                 "pidfd_send_signal(2) failed (pid %d exited?): %s", msg.creds.pid, strerror(errno));
+                 "pidfd_send_signal(2) failed (pid %d exited?): %s", msg.ancdata.creds.pid, strerror(errno));
         ret = -1;
         goto out;
     }
@@ -676,14 +561,14 @@ handle_message_setup(struct prof_data *state, struct message_with_ancdata msg, s
     state->stack_sample_skel = stack_sample_skel;
     stack_sample_skel = NULL;
     state->max_threads = msg.body.req_setup.max_threads;
-    state->caller_creds = msg.creds;
-    state->caller_pid = msg.creds.pid;
+    state->caller_creds = msg.ancdata.creds;
+    state->caller_pid = msg.ancdata.creds.pid;
 
-    struct message_with_ancdata res = { 0 };
+    struct perf_helper_msg res = { 0 };
     res.body.type = PERF_HELPER_MSG_RES_SETUP;
-    res.fd_count = 2;
-    res.fds[0] = state->perf_group_fd;
-    res.fds[1] = bpf_map__fd(state->stack_sample_skel->maps.events);
+    res.ancdata.fd_count = 2;
+    res.ancdata.fds[0] = state->perf_group_fd;
+    res.ancdata.fds[1] = bpf_map__fd(state->stack_sample_skel->maps.events);
     r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
         ret = -1;
@@ -705,7 +590,7 @@ out:
 }
 
 static int
-handle_message_newthread(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
+handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
     int ret;
     int thread_pidfd = -1;
@@ -713,13 +598,13 @@ handle_message_newthread(struct prof_data *state, struct message_with_ancdata ms
     pid_t thread_tid = 0;
     struct bpf_link *stack_sample_link = NULL;
 
-    if (msg.fd_count != 1) {
+    if (msg.ancdata.fd_count != 1) {
         snprintf(errbuf->str, errbuf->len,
-                 "received wrong number of FDs (got %zu)", msg.fd_count);
+                 "received wrong number of FDs (got %zu)", msg.ancdata.fd_count);
         ret = -1;
         goto out;
     }
-    thread_pidfd = msg.fds[0];
+    thread_pidfd = msg.ancdata.fds[0];
 
     /* validate that the pidfd == the pid we were given */
     thread_tid = msg.body.req_newthread.thread_tid;
@@ -823,7 +708,7 @@ handle_message_newthread(struct prof_data *state, struct message_with_ancdata ms
     numtable_set(&state->thread_table, thread_tid, (uintptr_t)thdata, NULL);
 
     /* Send the response message */
-    struct message_with_ancdata res = { 0 };
+    struct perf_helper_msg res = { 0 };
     res.body.type = PERF_HELPER_MSG_RES_NEWTHREAD;
     r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
@@ -849,11 +734,11 @@ out:
 }
 
 static int
-handle_message_endthread(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
+handle_message_endthread(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
-    if (msg.fd_count != 0) {
+    if (msg.ancdata.fd_count != 0) {
         snprintf(errbuf->str, errbuf->len,
-                 "received wrong number of FDs (got %zu)", msg.fd_count);
+                 "received wrong number of FDs (got %zu)", msg.ancdata.fd_count);
         return -1;
     }
 
@@ -862,7 +747,7 @@ handle_message_endthread(struct prof_data *state, struct message_with_ancdata ms
         return -1;
     }
 
-    struct message_with_ancdata res = { 0 };
+    struct perf_helper_msg res = { 0 };
     res.body.type = PERF_HELPER_MSG_RES_ENDTHREAD;
     r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
@@ -872,7 +757,7 @@ handle_message_endthread(struct prof_data *state, struct message_with_ancdata ms
 }
 
 static int
-handle_message(struct prof_data *state, struct message_with_ancdata msg, struct strbuf *errbuf)
+handle_message(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
     switch (msg.body.type) {
       case PERF_HELPER_MSG_REQ_SETUP:
@@ -934,7 +819,7 @@ run_event_loop(struct prof_data *state, struct strbuf *errbuf)
 
         /* What fd fired? */
         struct event_loop_epoll_data *evdata = event.data.ptr;
-        struct message_with_ancdata msg;
+        struct perf_helper_msg msg;
         switch (evdata->fd_type) {
           case EPOLL_FD_TYPE_SOCKET:
             /* handle message on main socket */

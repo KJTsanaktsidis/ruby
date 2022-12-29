@@ -6,6 +6,7 @@ $INCFLAGS << ' -I$(topdir) -I$(top_srcdir)'
 $VPATH << '$(topdir)' << '$(top_srcdir)'
 $defs << '-D_GNU_SOURCE'
 $objs = [
+  "perf_helper_message.#{$OBJEXT}",
   "profile.#{$OBJEXT}",
   "profile_session.#{$OBJEXT}",
   "perf_helper_proxy.#{$OBJEXT}"
@@ -18,11 +19,11 @@ create_makefile('profile') do |mk|
   mk << <<~MAKEFILE
     PERF_HELPER_BIN = $(TARGET_SO_DIR)perf_helper
 
-    perf_helper.o: perf_helper.c stack_sample.skel.h
+    perf_helper.o: perf_helper.c stack_sample.skel.h perf_helper_message.h
     \t$(ECHO) compiling $(<)
     \t$(Q) $(CC) $(INCFLAGS) $(CPPFLAGS) $(CFLAGS) -D_GNU_SOURCE $(COUTFLAG)$@ -c $(CSRCFLAG)$<
 
-    $(PERF_HELPER_BIN): perf_helper.o
+    $(PERF_HELPER_BIN): perf_helper.o perf_helper_message.o
     \t$(ECHO) linking perf_helper
     \t-$(Q)$(RM) $(@)
     \t$(Q) $(CC) -lbpf -o $@ $^

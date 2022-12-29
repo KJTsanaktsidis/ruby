@@ -1,9 +1,14 @@
-#ifndef __PERF_HELPER_H
-#define __PERF_HELPER_H
+#ifndef __PERF_HELPER_MESSAGE_H
+#define __PERF_HELPER_MESSAGE_H
+
+/* n.b. this is included from both the extension and the perf_helper,
+ * so no Ruby includes here */
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 
 /*
  * The perf_helper program is a privileged helper program used by the profile.so extension
@@ -97,7 +102,7 @@ typedef enum {
     PERF_HELPER_MSG_RES_ENDTHREAD = 6,
 } perf_helper_msg_type;
 
-struct perf_helper_msg {
+struct perf_helper_msg_body {
     perf_helper_msg_type type;
     union {
         struct perf_helper_req_setup {
@@ -109,20 +114,35 @@ struct perf_helper_msg {
             uintptr_t ruby_stack_ptr;
             int interval_hz;
         } req_newthread;
-        struct perf_helper_res_newthread { } res_newthread;
+        struct perf_helper_res_newthread {
+            pid_t thread_tid;
+        } res_newthread;
         struct perf_helper_req_endthread {
             pid_t thread_tid;
         } req_endthread;
-        struct perf_helper_res_endthread { } res_endthread;
+        struct perf_helper_res_endthread {
+            pid_t thread_tid;
+        } res_endthread;
     };
 };
 
-struct perf_helper_input {
-    bool group_leader_init;
-    pid_t thread_tid;
-    uintptr_t thread_value;
-    uintptr_t stack_ptr_addr;
-    uintptr_t stack_top;
+#define MAX_PERF_HELPER_FDS 16
+struct perf_helper_msg_ancdata {
+    struct ucred creds;
+    bool have_creds;
+    int fds[MAX_PERF_HELPER_FDS];
+    size_t fd_count;
 };
+
+struct perf_helper_msg {
+    struct perf_helper_msg_body body;
+    struct perf_helper_msg_ancdata ancdata;
+};
+
+int read_perf_helper_message(int socket_fd, struct perf_helper_msg *msg_out,
+                             char *errbuf, size_t errbuf_len);
+
+int write_perf_helper_message(int socket_fd, struct perf_helper_msg *msg,
+                               char *errbuf, size_t errbuf_len);
 
 #endif
