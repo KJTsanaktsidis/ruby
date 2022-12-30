@@ -14,6 +14,8 @@
 #include "vm_core.h"
 
 #include "profile.h"
+#include "perf_helper_proxy.h"
+#include "linux.h"
 #include "profile_session.h"
 #include "stack_sample.bpf.h"
 
@@ -272,4 +274,5 @@ Init_profile(void)
                                profile_s_stop, 0);
     init_perf_helper_proxy();
     init_profile_session();
+    init_profile_linux();
 }

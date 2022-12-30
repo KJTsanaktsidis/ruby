@@ -48,7 +48,7 @@ read_perf_helper_message(int socket_fd, struct perf_helper_msg *msg_out,
         if (r == -1 && errno == EINTR) {
             continue;
         }
-        if (r == -1 && errno = EWOULDBLOCK) {
+        if (r == -1 && errno == EWOULDBLOCK) {
             return 0;
         }
         if (r == -1) {
