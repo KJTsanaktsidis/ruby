@@ -19,7 +19,7 @@
 #include "profile_session.h"
 #include "stack_sample.bpf.h"
 
-VALUE cProfile;
+VALUE mProfile;
 VALUE rb_cProfileState;
 
 struct native_profile_thread_state {
@@ -173,7 +173,7 @@ native_profile_thread_ubf(void *ctx)
 static VALUE
 native_profile_thread_runloop(void *ctx)
 {
-    VALUE state_wrapper = rb_ivar_get(cProfile, rb_intern("profile_state"));
+    VALUE state_wrapper = rb_ivar_get(mProfile, rb_intern("profile_state"));
     struct native_profile_thread_state *state;
     TypedData_Get_Struct(state_wrapper, struct native_profile_thread_state,
                          &native_profile_thread_state_type, state);
@@ -263,14 +263,13 @@ __attribute__((visibility("default")))
 void
 Init_profile(void)
 {
-    cProfile = rb_define_class_under(rb_cObject, "Profile", rb_cObject);
-    rb_undef_alloc_func(cProfile);
-    rb_cProfileState = rb_define_class_under(cProfile, "State", rb_cObject);
+    mProfile = rb_define_module_under(rb_cObject, "Profile");
+    rb_cProfileState = rb_define_class_under(mProfile, "State", rb_cObject);
     rb_undef_alloc_func(rb_cProfileState);
 
-    rb_define_singleton_method(cProfile, "start",
+    rb_define_singleton_method(mProfile, "start",
                                profile_s_start, 0);
-    rb_define_singleton_method(cProfile, "stop",
+    rb_define_singleton_method(mProfile, "stop",
                                profile_s_stop, 0);
     init_perf_helper_proxy();
     init_profile_session();

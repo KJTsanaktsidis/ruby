@@ -1,5 +1,6 @@
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/limits.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
@@ -915,6 +916,22 @@ main(int argc, char **argv)
     close(STDOUT_FILENO);
     /* Don't need SIGPIPE, we'll find out that the socket is closed by error handling */
     signal(SIGPIPE, SIG_IGN);
+
+    /* Our stderr & socket fds come through as O_NONBLOCK, but we actually expect
+     * blocking behaviour in this program */
+    int fds[2] = { STDERR_FILENO, SOCKET_FD };
+    for (int i = 0; i < 2; i++) {
+        int fl_flags = fcntl(fds[i], F_GETFL);
+        if (fl_flags == -1) {
+            fprintf(stderr, "error calling fcntl(2) F_GETFL: %s", strerror(errno));
+            exit(1);
+        }
+        fl_flags &= ~O_NONBLOCK;
+        if (fcntl(fds[i], F_SETFL, fl_flags) == -1) {
+            fprintf(stderr, "error calling fcntl(2) F_GETFL: %s", strerror(errno));
+            exit(1);
+        }
+    }
 
     /* Zero out our state structure */
     struct prof_data state;

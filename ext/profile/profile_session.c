@@ -91,6 +91,6 @@ close_profile_session(VALUE self)
 
 void init_profile_session(void)
 {
-    cProfileSession = rb_define_class_under(cProfile, "Session", rb_cObject);
+    cProfileSession = rb_define_class_under(mProfile, "Session", rb_cObject);
     rb_undef_alloc_func(cProfileSession);
 }

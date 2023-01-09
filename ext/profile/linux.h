@@ -3,7 +3,7 @@
 
 #include <ruby.h>
 
-extern VALUE cProfileLinux;
+extern VALUE mProfileLinux;
 void init_profile_linux(void);
 
 #endif
