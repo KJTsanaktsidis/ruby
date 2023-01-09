@@ -27,7 +27,7 @@ create_makefile('profile') do |mk|
     $(PERF_HELPER_BIN): perf_helper.o perf_helper_message.o
     \t$(ECHO) linking perf_helper
     \t-$(Q)$(RM) $(@)
-    \t$(Q) $(CC) -lbpf -o $@ $^
+    \t$(Q) $(CC) -o $@ $^ -lbpf
 
     vmlinux.h:
     \tbpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
