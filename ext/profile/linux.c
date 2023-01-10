@@ -5,6 +5,7 @@
 #include <linux/close_range.h>
 #include <pthread.h>
 #include <ruby.h>
+#include <ruby/io.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -526,7 +527,11 @@ profile_linux_s_spawn_private(VALUE klass, VALUE cmdline, VALUE options)
             raising_error = true;
 
             /* this means the thing has exited, need to wait on it. */
-            r = waitid(P_PIDFD, pidfd, NULL, WEXITED | __WCLONE);
+            r = waitid(P_PIDFD, pidfd, NULL, WEXITED | __WCLONE | WNOHANG);
+            if (r == 0) {
+                snprintf(errbuf, sizeof(errbuf), "waitid(2) found no children on error");
+                raising_error = true;
+            }
             if (r == -1) {
                 snprintf(errbuf, sizeof(errbuf), "error calling waitid(2) after failure: %s",
                          strerror_r(errno, strerror_buf, sizeof(strerror_buf)));
@@ -550,10 +555,46 @@ profile_linux_s_spawn_private(VALUE klass, VALUE cmdline, VALUE options)
     return ret_array;
 }
 
+static VALUE
+profile_linux_s_pidfd_wait(VALUE klass, VALUE pidfd_io)
+{
+    rb_io_wait(pidfd_io, RB_INT2NUM(RUBY_IO_READABLE), Qfalse);
+    int pidfd = RB_NUM2INT(rb_funcall(pidfd_io, rb_intern("fileno"), 0));
+    siginfo_t info;
+    int r = waitid(P_PIDFD, pidfd, &info, WEXITED | __WCLONE | WNOHANG);
+    if (r == 0) {
+        rb_raise(rb_eRuntimeError, "no child exited after pidfd was readable");
+    }
+    if (r == -1) {
+        rb_sys_fail("waitid(2) failed after pidfd was readable");
+    }
+    /* Would be cool to return a Process::Status, but it has no public constructor. */
+    return RB_INT2NUM(info.si_status);
+}
+
+static VALUE
+profile_linux_s_pidfd_wait_nonblock(VALUE klass, VALUE pidfd_io)
+{
+    int pidfd = RB_NUM2INT(rb_funcall(pidfd_io, rb_intern("fileno"), 0));
+    siginfo_t info;
+    int r = waitid(P_PIDFD, pidfd, &info, WEXITED | __WCLONE | WNOHANG);
+    if (r == 0) {
+        return Qnil;
+    }
+    if (r == -1) {
+        rb_sys_fail("waitid(2) failed after pidfd was readable");
+    }
+    return RB_INT2NUM(info.si_status);
+}
+
 void
 init_profile_linux(void)
 {
     mProfileLinux = rb_define_module_under(mProfile, "Linux");
     rb_define_singleton_method(mProfileLinux, "spawn_private",
                                profile_linux_s_spawn_private, 2);
+    rb_define_singleton_method(mProfileLinux, "pidfd_wait",
+                               profile_linux_s_pidfd_wait, 1);
+    rb_define_singleton_method(mProfileLinux, "pidfd_wait_nonblock",
+                               profile_linux_s_pidfd_wait_nonblock, 1);
 }
