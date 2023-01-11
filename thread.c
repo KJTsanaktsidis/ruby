@@ -83,6 +83,7 @@
 #include "internal/io.h"
 #include "internal/object.h"
 #include "internal/proc.h"
+#include "internal/process.h"
 #include "ruby/fiber/scheduler.h"
 #include "internal/signal.h"
 #include "internal/thread.h"
@@ -4619,6 +4620,9 @@ rb_thread_atfork_internal(rb_thread_t *th, void (*atfork)(rb_thread_t *, const r
         }
     }
     rb_vm_living_threads_init(vm);
+    /* A handle used to wait on a subprocess will be invalid in a fork-child,
+     * such a "subprocess" is now a sibling! */
+    waitpid_private_handle_clear_table(vm);
 
     rb_ractor_atfork(vm, th);
 

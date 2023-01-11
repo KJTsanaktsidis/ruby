@@ -115,6 +115,7 @@ int initgroups(const char *, rb_gid_t);
 #include "ruby/thread.h"
 #include "ruby/util.h"
 #include "vm_core.h"
+#include "vm_sync.h"
 #include "ruby/ractor.h"
 
 /* define system APIs */
@@ -1081,6 +1082,53 @@ do_waitpid(rb_pid_t pid, int *st, int flags)
 
 #define WAITPID_LOCK_ONLY ((struct waitpid_state *)-1)
 
+struct waitpid_private_handle {
+    rb_pid_t pid;
+    bool have_reaped;
+    int status;
+    int refcount;
+};
+
+static struct waitpid_private_handle *
+waitpid_private_handle_new(void)
+{
+    struct waitpid_private_handle *h = ruby_xcalloc(1, sizeof(struct waitpid_private_handle));
+    h->pid = -1;
+    h->refcount = 1;
+    return h;
+}
+
+
+static void
+waitpid_private_handle_addref(struct waitpid_private_handle *h)
+{
+    h->refcount++;
+}
+
+static void
+waitpid_private_handle_unref(struct waitpid_private_handle *h)
+{
+    h->refcount--;
+    if (!h->refcount) {
+        ruby_xfree(h);
+    }
+}
+
+static int
+waitpid_private_handle_clear_table_i(st_data_t key, st_data_t value, st_data_t arg)
+{
+    struct waitpid_private_handle *h = (struct waitpid_private_handle *)h;
+    waitpid_private_handle_unref(h);
+    return ST_CONTINUE;
+}
+
+void
+waitpid_private_handle_clear_table(rb_vm_t *vm)
+{
+    st_foreach(vm->waitpid_private_handles, waitpid_private_handle_clear_table_i, 0);
+    st_clear(vm->waitpid_private_handles);
+}
+
 struct waitpid_state {
     struct ccan_list_node wnode;
     rb_execution_context_t *ec;
@@ -1090,6 +1138,7 @@ struct waitpid_state {
     int status;
     int options;
     int errnum;
+    struct waitpid_private_handle *waiting_with;
 };
 
 int rb_sigwait_fd_get(const rb_thread_t *);
@@ -1105,6 +1154,52 @@ static struct waitpid_state mjit_waitpid_state;
 bool mjit_waitpid_finished = false;
 int mjit_waitpid_status = 0;
 #endif
+
+/* Calls waitpid on the state. Might fill w->ret with -1 (on error), a pid (on reap),
+ * or 0 (if nothing was reaped into it). */
+static void
+run_waitpid_for_state(rb_vm_t *vm, struct waitpid_state *w)
+{
+    if (w->waiting_with && w->waiting_with->have_reaped) {
+        w->status = w->waiting_with->status;
+        w->ret = w->waiting_with->pid;
+        return;
+    }
+
+    while (TRUE) {
+        int status;
+        rb_pid_t ret = do_waitpid(w->pid, &status, w->options | WNOHANG);
+        if (ret == -1) {
+            w->ret = -1;
+            w->errnum = errno;
+            return;
+        }
+        if (ret == 0) {
+            w->ret = 0;
+            return;
+        }
+        /* waitpid returned something, but should we actually return it to the caller
+        * or should we steal it for some other caller using a private handle to the proc? */
+        struct waitpid_private_handle *required_handle;
+        st_data_t pid_key = (st_data_t)ret;
+        int is_private = st_delete(vm->waitpid_private_handles, &pid_key, (st_data_t *)&required_handle);
+        if (is_private) {
+            /* mark the handle as reaped */
+            required_handle->have_reaped = true;
+            required_handle->status = status;
+            waitpid_private_handle_unref(required_handle);
+        }
+        if (!is_private || w->waiting_with == required_handle) {
+            /* return it */
+            w->status = status;
+            w->ret = ret;
+            return;
+        }
+        /* Otherwise, steal it - we've stashed away the status code for some subsequent
+         * call to waitpid to find it in required_handle. Go round the loop again now
+         * and try and satisfy _this_ call to waitpid with something else. */
+    }
+}
 
 static int
 waitpid_signal(struct waitpid_state *w)
@@ -1168,19 +1263,16 @@ rb_sigwait_fd_migrate(rb_vm_t *vm)
 extern volatile unsigned int ruby_nocldwait; /* signal.c */
 /* called by timer thread or thread which acquired sigwait_fd */
 static void
-waitpid_each(struct ccan_list_head *head)
+waitpid_each(rb_vm_t *vm, struct ccan_list_head *head)
 {
     struct waitpid_state *w = 0, *next;
 
     ccan_list_for_each_safe(head, w, next, wnode) {
-        rb_pid_t ret = do_waitpid(w->pid, &w->status, w->options | WNOHANG);
-
-        if (!ret) continue;
-        if (ret == -1) w->errnum = errno;
-
-        w->ret = ret;
-        ccan_list_del_init(&w->wnode);
-        waitpid_signal(w);
+        run_waitpid_for_state(vm, w);
+        if (w->ret) {
+            ccan_list_del_init(&w->wnode);
+            waitpid_signal(w);
+        }
     }
 }
 #else
@@ -1192,14 +1284,18 @@ ruby_waitpid_all(rb_vm_t *vm)
 {
 #if RUBY_SIGCHLD
     rb_native_mutex_lock(&vm->waitpid_lock);
-    waitpid_each(&vm->waiting_pids);
+    waitpid_each(vm, &vm->waiting_pids);
     if (ccan_list_empty(&vm->waiting_pids)) {
-        waitpid_each(&vm->waiting_grps);
+        waitpid_each(vm, &vm->waiting_grps);
     }
     /* emulate SA_NOCLDWAIT */
-    if (ccan_list_empty(&vm->waiting_pids) && ccan_list_empty(&vm->waiting_grps)) {
-        while (ruby_nocldwait && do_waitpid(-1, 0, WNOHANG) > 0)
-            ; /* keep looping */
+    if (ccan_list_empty(&vm->waiting_pids) && ccan_list_empty(&vm->waiting_grps) && ruby_nocldwait) {
+        while (TRUE) {
+            /* keep doing waitpid(-1) till we reap everything and get ECHLD. */
+            struct waitpid_state reap_anything_state = {.pid = -1, .options = 0};
+            run_waitpid_for_state(vm, &reap_anything_state);
+            if (reap_anything_state.ret <= 0) break;
+        }
     }
     rb_native_mutex_unlock(&vm->waitpid_lock);
 #endif
@@ -1213,6 +1309,7 @@ waitpid_state_init(struct waitpid_state *w, rb_pid_t pid, int options)
     w->options = options;
     w->errnum = 0;
     w->status = 0;
+    w->waiting_with = NULL;
 }
 
 #if USE_MJIT
@@ -1261,7 +1358,7 @@ waitpid_cleanup(VALUE x)
 }
 
 static void
-waitpid_wait(struct waitpid_state *w)
+waitpid_with_SIGCHLD(struct waitpid_state *w)
 {
     rb_vm_t *vm = rb_ec_vm_ptr(w->ec);
     int need_sleep = FALSE;
@@ -1274,7 +1371,7 @@ waitpid_wait(struct waitpid_state *w)
     rb_native_mutex_lock(&vm->waitpid_lock);
 
     if (w->pid > 0 || ccan_list_empty(&vm->waiting_pids)) {
-        w->ret = do_waitpid(w->pid, &w->status, w->options | WNOHANG);
+        run_waitpid_for_state(vm, w);
     }
 
     if (w->ret) {
@@ -1325,8 +1422,18 @@ waitpid_no_SIGCHLD(struct waitpid_state *w)
         w->errnum = errno;
 }
 
-VALUE
-rb_process_status_wait(rb_pid_t pid, int flags)
+static void
+waitpid_wait(struct waitpid_state *w)
+{
+    if (WAITPID_USE_SIGCHLD) {
+        waitpid_with_SIGCHLD(w);
+    } else {
+        waitpid_no_SIGCHLD(w);
+    }
+}
+
+static VALUE
+rb_process_status_wait(rb_pid_t pid, struct waitpid_private_handle *handle, int flags)
 {
     // We only enter the scheduler if we are "blocking":
     if (!(flags & WNOHANG)) {
@@ -1339,13 +1446,10 @@ rb_process_status_wait(rb_pid_t pid, int flags)
 
     waitpid_state_init(&waitpid_state, pid, flags);
     waitpid_state.ec = GET_EC();
-
-    if (WAITPID_USE_SIGCHLD) {
-        waitpid_wait(&waitpid_state);
+    if (handle) {
+        waitpid_state.waiting_with = handle;
     }
-    else {
-        waitpid_no_SIGCHLD(&waitpid_state);
-    }
+    waitpid_wait(&waitpid_state);
 
     if (waitpid_state.ret == 0) return Qnil;
 
@@ -1417,13 +1521,13 @@ rb_process_status_waitv(int argc, VALUE *argv, VALUE _)
         flags = RB_NUM2INT(argv[1]);
     }
 
-    return rb_process_status_wait(pid, flags);
+    return rb_process_status_wait(pid, NULL, flags);
 }
 
-rb_pid_t
-rb_waitpid(rb_pid_t pid, int *st, int flags)
+static rb_pid_t
+rb_waitpid_handle(rb_pid_t pid, struct waitpid_private_handle *handle, int *st, int flags)
 {
-    VALUE status = rb_process_status_wait(pid, flags);
+    VALUE status = rb_process_status_wait(pid, handle, flags);
     if (NIL_P(status)) return 0;
 
     struct rb_process_status *data = RTYPEDDATA_DATA(status);
@@ -1439,6 +1543,12 @@ rb_waitpid(rb_pid_t pid, int *st, int flags)
     }
 
     return pid;
+}
+
+rb_pid_t
+rb_waitpid(rb_pid_t pid, int *st, int flags)
+{
+    return rb_waitpid_handle(pid, NULL, st, flags);
 }
 
 static VALUE
@@ -3781,6 +3891,15 @@ proc_syswait(VALUE pid)
     return Qnil;
 }
 
+static VALUE
+proc_syswait_handle(VALUE handlearg)
+{
+    struct waitpid_private_handle *handle = (struct waitpid_private_handle *)handlearg;
+    int status;
+    rb_waitpid_handle(handle->pid, handle, &status, 0);
+    return Qnil;
+}
+
 static int
 move_fds_to_avoid_crash(int *fdp, int n, VALUE fds)
 {
@@ -4148,14 +4267,14 @@ static rb_pid_t
 retry_fork_async_signal_safe(struct rb_process_status *status, int *ep,
         int (*chfunc)(void*, char *, size_t), void *charg,
         char *errmsg, size_t errmsg_buflen,
-        struct waitpid_state *w)
+        struct waitpid_state *w, struct waitpid_private_handle *handle)
 {
     rb_pid_t pid;
     volatile int try_gc = 1;
     struct child_handler_disabler_state old;
     int err;
     rb_nativethread_lock_t *const volatile waitpid_lock_init =
-        (w && WAITPID_USE_SIGCHLD) ? &GET_VM()->waitpid_lock : 0;
+        ((w && WAITPID_USE_SIGCHLD) || handle) ? &GET_VM()->waitpid_lock : 0;
 
     while (1) {
         rb_nativethread_lock_t *waitpid_lock = waitpid_lock_init;
@@ -4190,9 +4309,14 @@ retry_fork_async_signal_safe(struct rb_process_status *status, int *ep,
         err = errno;
         waitpid_lock = waitpid_lock_init;
         if (waitpid_lock) {
-            if (pid > 0 && w != WAITPID_LOCK_ONLY) {
+            if (pid > 0 && w && w != WAITPID_LOCK_ONLY) {
                 w->pid = pid;
                 ccan_list_add(&GET_VM()->waiting_pids, &w->wnode);
+            }
+            if (handle) {
+                handle->pid = pid;
+                waitpid_private_handle_addref(handle);
+                st_insert(GET_VM()->waitpid_private_handles, (st_data_t)pid, (st_data_t)handle);
             }
             rb_native_mutex_unlock(waitpid_lock);
         }
@@ -4232,7 +4356,7 @@ rb_mjit_fork(void)
 static rb_pid_t
 fork_check_err(struct rb_process_status *status, int (*chfunc)(void*, char *, size_t), void *charg,
         VALUE fds, char *errmsg, size_t errmsg_buflen,
-        struct rb_execarg *eargp)
+        struct rb_execarg *eargp, struct waitpid_private_handle *handle)
 {
     rb_pid_t pid;
     int err;
@@ -4245,7 +4369,7 @@ fork_check_err(struct rb_process_status *status, int (*chfunc)(void*, char *, si
 
     if (pipe_nocrash(ep, fds)) return -1;
 
-    pid = retry_fork_async_signal_safe(status, ep, chfunc, charg, errmsg, errmsg_buflen, w);
+    pid = retry_fork_async_signal_safe(status, ep, chfunc, charg, errmsg, errmsg_buflen, w, handle);
 
     if (status) status->pid = pid;
 
@@ -4260,18 +4384,19 @@ fork_check_err(struct rb_process_status *status, int (*chfunc)(void*, char *, si
     error_occurred = recv_child_error(ep[0], &err, errmsg, errmsg_buflen);
 
     if (error_occurred) {
-        if (status) {
+        if (status) status->error = err;
+        /* Q: who should reap the failed child? */
+        if (w && w != WAITPID_LOCK_ONLY) {
+            /* A: whoever passed a waitpid state into eagrp. */
+        } else {
+            /* A: us. */
             int state = 0;
-            status->error = err;
-
-            VM_ASSERT((w == 0 || w == WAITPID_LOCK_ONLY) &&
-                      "only used by extensions");
-            rb_protect(proc_syswait, (VALUE)pid, &state);
-
-            status->status = state;
-        }
-        else if (!w || w == WAITPID_LOCK_ONLY) {
-            rb_syswait(pid);
+            if (handle) {
+                rb_protect(proc_syswait_handle, (VALUE)handle, &state);
+            } else {
+                rb_protect(proc_syswait, (VALUE)pid, &state);
+            }
+            if (status) status->status = state;
         }
 
         errno = err;
@@ -4295,7 +4420,7 @@ rb_fork_async_signal_safe(int *status,
 {
     struct rb_process_status process_status;
 
-    rb_pid_t result = fork_check_err(&process_status, chfunc, charg, fds, errmsg, errmsg_buflen, 0);
+    rb_pid_t result = fork_check_err(&process_status, chfunc, charg, fds, errmsg, errmsg_buflen, 0, 0);
 
     if (status) {
         *status = process_status.status;
@@ -4673,7 +4798,8 @@ rb_spawn_process(struct rb_execarg *eargp, char *errmsg, size_t errmsg_buflen)
 #endif
 
 #if defined HAVE_WORKING_FORK && !USE_SPAWNV
-    pid = fork_check_err(eargp->status, rb_exec_atfork, eargp, eargp->redirect_fds, errmsg, errmsg_buflen, eargp);
+    struct waitpid_private_handle *h = eargp->waitpid_private_handle;
+    pid = fork_check_err(eargp->status, rb_exec_atfork, eargp, eargp->redirect_fds, errmsg, errmsg_buflen, eargp, h);
 #else
     prog = eargp->use_shell ? eargp->invoke.sh.shell_script : eargp->invoke.cmd.command_name;
 
@@ -4842,7 +4968,7 @@ rb_f_system(int argc, VALUE *argv, VALUE _)
     rb_pid_t pid = rb_execarg_spawn(execarg_obj, 0, 0);
 
     if (pid > 0) {
-        VALUE status = rb_process_status_wait(pid, 0);
+        VALUE status = rb_process_status_wait(pid, NULL, 0);
         struct rb_process_status *data = RTYPEDDATA_DATA(status);
 
         // Set the last status:
@@ -5182,6 +5308,99 @@ rb_f_spawn(int argc, VALUE *argv, VALUE _)
 #else
     return Qnil;
 #endif
+}
+
+static VALUE rb_cProcHandle;
+
+struct rb_proc_handle {
+    struct waitpid_private_handle *native_handle;
+};
+
+static void
+rb_proc_handle_free(void *ptr)
+{
+    struct rb_proc_handle *h = (struct rb_proc_handle *)ptr;
+    if (h->native_handle) {
+        waitpid_private_handle_unref(h->native_handle);
+    }
+}
+
+static const rb_data_type_t rb_proc_handle_type = {
+    .wrap_struct_name = "Process::PrivateHandle",
+    .function = {
+        .dfree = rb_proc_handle_free,
+    },
+    .data = NULL,
+    .flags = RUBY_TYPED_FREE_IMMEDIATELY,
+};
+
+static VALUE
+rb_proc_handle_new(void)
+{
+    struct rb_proc_handle *h;
+    VALUE obj = TypedData_Make_Struct(rb_cProcHandle, struct rb_proc_handle, &rb_proc_handle_type, h);
+    h->native_handle = waitpid_private_handle_new();
+    return obj;
+}
+
+static struct waitpid_private_handle *
+rb_proc_handle_get_native(VALUE self)
+{
+    struct rb_proc_handle *h;
+    TypedData_Get_Struct(self, struct rb_proc_handle, &rb_proc_handle_type, h);
+    return h->native_handle;
+}
+
+static VALUE
+rb_proc_handle_wait(int argc, VALUE *argv, VALUE self)
+{
+    rb_check_arity(argc, 0, 1);
+    struct rb_proc_handle *h;
+    TypedData_Get_Struct(self, struct rb_proc_handle, &rb_proc_handle_type, h);
+
+    int flags = 0;
+    if (argc == 1) {
+        flags = RB_NUM2UINT(argv[0]);
+    }
+
+    int status;
+    pid_t pid = rb_waitpid_handle(h->native_handle->pid, h->native_handle, &status, flags);
+    if (pid < 0) {
+        rb_sys_fail(0);
+    } else if (pid == 0) {
+        rb_last_status_clear();
+        return Qnil;
+    }
+
+    return rb_assoc_new(PIDT2NUM(pid), rb_last_status_get());
+}
+
+
+static VALUE
+rb_f_spawn_private(int argc, VALUE *argv, VALUE klass)
+{
+    rb_pid_t pid;
+    char errmsg[CHILD_ERRMSG_BUFLEN] = { '\0' };
+    VALUE execarg_obj, fail_str;
+    struct rb_execarg *eargp;
+
+    execarg_obj = rb_execarg_new(argc, argv, TRUE, FALSE);
+    eargp = rb_execarg_get(execarg_obj);
+    fail_str = eargp->use_shell ? eargp->invoke.sh.shell_script : eargp->invoke.cmd.command_name;
+
+    VALUE handle = rb_proc_handle_new();
+    eargp->waitpid_private_handle = rb_proc_handle_get_native(handle);
+
+    pid = rb_execarg_spawn(execarg_obj, errmsg, sizeof(errmsg));
+
+    if (pid == -1) {
+        int err = errno;
+        rb_exec_fail(eargp, err, errmsg);
+        RB_GC_GUARD(execarg_obj);
+        rb_syserr_fail_str(err, fail_str);
+    }
+
+    return rb_assoc_new(PIDT2NUM(pid), handle);
 }
 
 /*
@@ -8816,6 +9035,7 @@ InitVM_process(void)
     rb_define_singleton_method(rb_mProcess, "exec", f_exec, -1);
     rb_define_singleton_method(rb_mProcess, "fork", rb_f_fork, 0);
     rb_define_singleton_method(rb_mProcess, "spawn", rb_f_spawn, -1);
+    rb_define_singleton_method(rb_mProcess, "spawn_private", rb_f_spawn_private, -1);
     rb_define_singleton_method(rb_mProcess, "exit!", rb_f_exit_bang, -1);
     rb_define_singleton_method(rb_mProcess, "exit", f_exit, -1);
     rb_define_singleton_method(rb_mProcess, "abort", f_abort, -1);
@@ -9244,6 +9464,10 @@ InitVM_process(void)
     rb_define_module_function(rb_mProcID_Syscall, "setresuid", p_sys_setresuid, 3);
     rb_define_module_function(rb_mProcID_Syscall, "setresgid", p_sys_setresgid, 3);
     rb_define_module_function(rb_mProcID_Syscall, "issetugid", p_sys_issetugid, 0);
+
+    rb_cProcHandle = rb_define_class_under(rb_mProcess, "PrivateHandle", rb_cObject);
+    rb_undef_alloc_func(rb_cProcHandle);
+    rb_define_method(rb_cProcHandle, "wait", rb_proc_handle_wait, -1);
 }
 
 void

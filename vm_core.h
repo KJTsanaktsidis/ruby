@@ -653,6 +653,7 @@ typedef struct rb_vm_struct {
     struct ccan_list_head waiting_pids; /* PID > 0: <=> struct waitpid_state */
     struct ccan_list_head waiting_grps; /* PID <= 0: <=> struct waitpid_state */
     struct ccan_list_head waiting_fds; /* <=> struct waiting_fd */
+    struct st_table *waitpid_private_handles;
 
     /* set in single-threaded processes only: */
     volatile int ubf_async_safe;

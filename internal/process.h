@@ -22,6 +22,7 @@
 #include "ruby/ruby.h"          /* for VALUE */
 #include "internal/imemo.h"     /* for RB_IMEMO_TMPBUF_PTR */
 #include "internal/warnings.h"  /* for COMPILER_WARNING_PUSH */
+#include "vm_core.h"
 
 #define RB_MAX_GROUPS (65536)
 
@@ -59,6 +60,7 @@ struct rb_execarg {
     unsigned exception_given : 1;
     struct rb_process_status *status;
     struct waitpid_state *waitpid_state; /* for async process management */
+    struct waitpid_private_handle *waitpid_private_handle;
     rb_pid_t pgroup_pgid; /* asis(-1), new pgroup(0), specified pgroup (0<V). */
     VALUE rlimit_limits; /* Qfalse or [[rtype, softlim, hardlim], ...] */
     mode_t umask_mask;
@@ -76,6 +78,7 @@ struct rb_execarg {
 
 /* process.c */
 rb_pid_t rb_call_proc__fork(void);
+void waitpid_private_handle_clear_table(rb_vm_t *vm);
 void rb_last_status_clear(void);
 static inline char **ARGVSTR2ARGV(VALUE argv_str);
 static inline size_t ARGVSTR2ARGC(VALUE argv_str);

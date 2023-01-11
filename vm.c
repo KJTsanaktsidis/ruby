@@ -3999,6 +3999,7 @@ Init_BareVM(void)
     vm->negative_cme_table = rb_id_table_create(16);
     vm->overloaded_cme_table = st_init_numtable();
     vm->constant_cache = rb_id_table_create(0);
+    vm->waitpid_private_handles = st_init_numtable();
 
     // setup main thread
     th->nt = ZALLOC(struct rb_native_thread);
