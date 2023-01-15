@@ -64,7 +64,7 @@ read_perf_helper_message(int socket_fd, struct perf_helper_msg *msg_out,
     }
 
 
-    if (r < (int)sizeof(struct perf_helper_msg)) {
+    if (r < (int)sizeof(struct perf_helper_msg_body)) {
         snprintf(errbuf, errbuf_len,
                  "received message too small (%d bytes)", r);
         return -1;
@@ -75,21 +75,24 @@ read_perf_helper_message(int socket_fd, struct perf_helper_msg *msg_out,
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
     while (cmsg) {
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS) {
-            if (cmsg->cmsg_len != sizeof(struct ucred)) {
+            size_t body_len = cmsg->cmsg_len - sizeof(struct cmsghdr);
+            if (body_len != sizeof(struct ucred)) {
                 snprintf(errbuf, errbuf_len,
-                         "size of SCM_CREDENTIALS message wrong (got %zu)", cmsg->cmsg_len);
+                         "size of SCM_CREDENTIALS message wrong (got %zu)", body_len);
                 return -1;
             }
             memcpy(&msg_out->ancdata.creds, CMSG_DATA(cmsg), cmsg->cmsg_len);
             msg_out->ancdata.have_creds = true;
         } else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            if (cmsg->cmsg_len > MAX_PERF_HELPER_FDS * sizeof(int)) {
+            int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
+            if (num_fds + msg_out->ancdata.fd_count > MAX_PERF_HELPER_FDS) {
                 snprintf(errbuf, errbuf_len,
-                         "size of SCM_RIGHTS message too high (got %zu)", cmsg->cmsg_len);
+                         "too many fds in SCM_RIGHTS message(s)");
                 return -1;
             }
-            memcpy(msg_out->ancdata.fds, CMSG_DATA(cmsg), cmsg->cmsg_len);
-            msg_out->ancdata.fd_count = cmsg->cmsg_len / sizeof(int);            
+            int *fd_mem = msg_out->ancdata.fds + msg_out->ancdata.fd_count;
+            memcpy(fd_mem, CMSG_DATA(cmsg), cmsg->cmsg_len);
+            msg_out->ancdata.fd_count += num_fds;
         }
         
         cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
@@ -123,9 +126,11 @@ write_perf_helper_message(int socket_fd, struct perf_helper_msg *msg,
     struct msghdr socket_msg;
     socket_msg.msg_iov = &iov;
     socket_msg.msg_iovlen = 1;
+    socket_msg.msg_control = cmsgbuf.buf;
     socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
     socket_msg.msg_flags = 0;
 
+    size_t controllen = 0;
     struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
 
     if (msg->ancdata.have_creds) {
@@ -133,14 +138,21 @@ write_perf_helper_message(int socket_fd, struct perf_helper_msg *msg,
         cmsg->cmsg_type = SCM_CREDENTIALS;
         cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
         memcpy(CMSG_DATA(cmsg), &msg->ancdata.creds, sizeof(struct ucred));
+        controllen += CMSG_ALIGN(cmsg->cmsg_len);
         cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
     }
     if (msg->ancdata.fd_count > 0 && msg->ancdata.fd_count < MAX_PERF_HELPER_FDS) {
         cmsg->cmsg_level = SOL_SOCKET;
         cmsg->cmsg_type = SCM_RIGHTS;
-        cmsg->cmsg_len = CMSG_LEN(msg->ancdata.fd_count * sizeof(int));
-        memcpy(CMSG_DATA(cmsg), msg->ancdata.fds, cmsg->cmsg_len);
+        int data_len = msg->ancdata.fd_count * sizeof(int);
+        cmsg->cmsg_len = CMSG_LEN(data_len);
+        memcpy(CMSG_DATA(cmsg), msg->ancdata.fds, data_len);
+        controllen += CMSG_ALIGN(cmsg->cmsg_len);
         cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
+    }
+    socket_msg.msg_controllen = controllen;
+    if (controllen == 0) {
+        socket_msg.msg_control = NULL;
     }
 
     int r;

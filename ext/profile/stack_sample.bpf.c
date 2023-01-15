@@ -29,12 +29,13 @@ stack_sample(struct bpf_perf_event_data *ctx)
     if (!event) {
         return 1;
     }
+    __u32 tid = bpf_get_current_pid_tgid() | 0xFFFFFFFF;
     event->pid = bpf_get_current_pid_tgid() >> 32;
-    event->tid = bpf_get_current_pid_tgid() | 0xFFFFFFFF;
+    event->tid = tid;
     event->cpu_id = bpf_get_smp_processor_id();
     event->sample_period = ctx->sample_period;
 
-    struct stack_sample_thread_data *tdata = bpf_map_lookup_elem(&thread_data, &event->tid);
+    struct stack_sample_thread_data *tdata = bpf_map_lookup_elem(&thread_data, &tid);
     if (tdata) {
         int r = bpf_probe_read_user(&event->stack_ptr, sizeof(void *), (void *)tdata->ruby_stack_ptr);
         if (r != 0) {

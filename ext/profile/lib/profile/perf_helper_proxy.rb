@@ -1,47 +1,119 @@
 # frozen_string_literal: true
 
+require 'socket'
+require 'tempfile'
+
 module Profile
   class PerfHelperProxy
     def initialize
+      @lock = Mutex.new
       @helper_socket, helper_socket_remote = Socket.socketpair :AF_UNIX, :SOCK_SEQPACKET
-      @helper_stderr, helper_stderr_remote = IO.pipe
-      @helper_pidfd = self.class._fork_perf_helper(
-        self.class.perf_helper_bin_path, helper_socket_remote, helper_stderr_remote
+      # Use an unlinked tempfile, rather than a pipe, to capture stderr, so we don't
+      # need to worry about draining the pipe in a thread or in the event loop.
+      @helper_stderr = Tempfile.new('perf_helper_prox')
+      @helper_stderr.unlink
+      @helper_pid = Process.spawn(
+        perf_helper_bin_path,
+        in: File.open("/dev/null", "r"),
+        out: File.open("/dev/null", "w"),
+        err: @helper_stderr,
+        3 => helper_socket_remote,
+        close_others: true,
       )
+    rescue
+      close rescue nil
+      raise
     ensure
       helper_socket_remote&.close
-      helper_stderr_remote&.close
     end
 
     def close
-      @helper_socket.close
-      Profile::Linux.pidfd_send_sigkill @helper_pidfd
-      Profile::Linux.pidfd_wait @helper_pidfd
-      @helper_pidfd.close
-      @helper_stderr.close
+      @helper_socket&.close
+      @helper_socket = nil
+      if @helper_pid
+        Process.kill :TERM, @helper_pid
+        _, status = Process.waitpid2 @helper_pid
+        @helper_pid = nil
+
+        @helper_stderr.rewind
+        @errmsg = @helper_stderr.read
+        if @errmsg.empty? && !status.success?
+          @errmsg = "perf_helper exited with status #{status.inspect}"
+        end
+      end
+      @helper_stderr&.close
+      @helper_stderr = nil
     end
 
-    def setup(max_threads: 1024)
-      body_bytes = self.class._build_message_setup(max_threads)
-      self_pidfd = Profile::Linux.pidfd_for_main_thread
-      creds_ancdata = Profile::Linux.scm_credentials_ancdata
+
+    def setup
+      body_bytes = _pack_msg_setup({
+        max_threads: 1024
+      })
+      self_pidfd = Profile::Linux.pidfd_open(Process.pid)
+      creds_ancdata = Socket::Credentials.for_process.as_ancillary_data
       rights_ancdata = Socket::AncillaryData.unix_rights(self_pidfd)
-
-      @helper_socket.sendmsg body_bytes, 0, nil, creds_ancdata, rights_ancdata
-      _, _, _, recvd_ancdata = @helper_socket.recvmsg
+      _, fds = do_req_res body_bytes, [creds_ancdata, rights_ancdata]
       # [0] is the perf group fd, [1] is the bpf ringbuffer fd.
-      recvd_ancdata.unix_rights[0..1]
+      fds[0..1]
     end
 
-    def newthread
-      body_bytes = self.class._build_message_newthread
-      thread_pidfd = Profile::Linux.pidfd_for_current_thread
-      ancdata = Socket::AncillaryData.unix_rights(thread_pidfd)
+    def newthread(thread)
+      puts "req'ing for #{thread.native_thread_id} (pid #{Process.pid})"
+      body_bytes = _pack_msg_newthread({
+        interval_hz: 50,
+        tid: thread.native_thread_id
+      })
+      do_req_res body_bytes
     end
 
-    def self.perf_helper_bin_path
+    def endthread
+      body_bytes = _pack_msg_endthread({
+        interval_hz: 50,
+        tid: Thread.current.native_thread_id
+      })
+
+      @lock.synchronize do
+        begin
+          @helper_socket.sendmsg body_bytes
+          recvd_msg = @helper_socket.recvmsg
+        rescue
+          reap_and_raise or raise
+        end
+        if recvd_msg.size == 0
+          reap_and_raise or raise "unexpected EOF when reading from perf_helper"
+        end
+      end
+    end
+
+    private
+
+    def reap_and_raise
+      close
+      raise @errmsg unless @errmsg.empty?
+      false
+    end
+
+    def do_req_res(req_body, ancdata = [])
+      @lock.synchronize do
+        begin
+          @helper_socket.sendmsg req_body, 0, nil, *ancdata
+          res_body, _, _, *recvd_ancdata = @helper_socket.recvmsg(scm_rights: true)
+        rescue => e
+          reap_and_raise or raise
+        end
+        if res_body.size == 0
+          # means socket is closed
+          reap_and_raise or raise "unexpected EOF when reading from perf_helper"
+        end
+        fds = recvd_ancdata.flat_map { _1.unix_rights }
+        return res_body, fds
+      end
+    end
+
+    def perf_helper_bin_path
       @perf_helper_bin_path ||= begin
-        ext_dir = File.dirname(_get_ext_path)
+        ext_dir = File.dirname(File.realpath(_get_ext_path))
         File.join(ext_dir, "perf_helper#{RbConfig::CONFIG['EXEEXT']}")
       end
     end

@@ -212,7 +212,6 @@ numtable_each(struct numtable *tab, numtable_iter_func iter_func, void *ctx)
  */
 
 #define EPOLL_FD_TYPE_SOCKET 1
-#define EPOLL_FD_TYPE_THREAD 2
 
 /* Type of data we stash in epoll */
 struct event_loop_epoll_data {
@@ -224,7 +223,6 @@ struct event_loop_epoll_data {
 struct thread_data {
     /* the thread being profiled */
     pid_t tid;
-    int tid_fd;
 
     /* perf_event_open handle for this thread */
     int perf_fd;
@@ -332,20 +330,22 @@ validate_socket_peercred_matches_parent(int socket_fd, struct strbuf *errbuf)
     return 0;
 }
 
-__attribute__(( format(scanf, 2, 4) ))
+__attribute__(( format(scanf, 3, 5) ))
 static int
-read_pattern_from_procfile(char *fname, const char *pattern, struct strbuf *errbuf, ...)
+read_pattern_from_procfile(int at, const char *fname, const char *pattern, struct strbuf *errbuf, ...)
 {
     va_list args;
     va_start(args, errbuf);
     int ret = 0;
-    FILE *f = fopen(fname, "r");
-    if (f == NULL) {
+    FILE *f = NULL;
+    int fd = openat(at, fname, O_RDONLY);
+    if (fd == -1) {
         snprintf(errbuf->str, errbuf->len,
                  "error opening %s: %s", fname, strerror(errno));
         ret = -1;
         goto out;
     }
+    f = fdopen(fd, "r");
     bool partline = false;
     char linebuf[256];
     while (!feof(f)) {
@@ -385,13 +385,26 @@ pidfd_alive(int pidfd, pid_t pidfd_pid, struct strbuf *errbuf)
 }
 
 static int
+thread_metadata_dir_alive(int meta_dirfd, pid_t tid, struct strbuf *errbuf)
+{
+    int f = openat(meta_dirfd, "status", O_RDONLY);
+    if (f == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "openat(2) check on thread failed (thread %d exited?): %s", tid, strerror(errno));
+        return -1;
+    }
+    close(f);
+    return 0;
+}
+
+static int
 validate_pidfd_pid_matches(pid_t pid, int pidfd, struct strbuf *errbuf)
 {
     /* First, need to find what pid this pidfd is for */
     char fname[PATH_MAX];
     snprintf(fname, sizeof(fname), "/proc/self/fdinfo/%d", pidfd);
     pid_t pidfd_pid;
-    int r = read_pattern_from_procfile(fname, "Pid: %d", errbuf, &pidfd_pid);
+    int r = read_pattern_from_procfile(AT_FDCWD, fname, "Pid: %d", errbuf, &pidfd_pid);
     if (r == -1) {
         return r;
     } else if (r == 0) {
@@ -431,16 +444,28 @@ validate_creds_match_self(struct ucred creds, struct strbuf *errbuf)
 }
 
 static int
-get_thread_tgid(pid_t pid, pid_t *tgid_out, struct strbuf *errbuf)
+open_thread_metadata_dir(pid_t pid, pid_t tid, struct strbuf *errbuf)
 {
-    char status_fname[PATH_MAX];
-    snprintf(status_fname, sizeof(status_fname), "/proc/%d/status", pid);
-    int r = read_pattern_from_procfile(status_fname, "Tgid: %d", errbuf, tgid_out);
+    char meta_dirname[PATH_MAX];
+    snprintf(meta_dirname, sizeof(meta_dirname), "/proc/%d/task/%d", pid, tid);
+    int r = open(meta_dirname, O_RDONLY | O_DIRECTORY);
+    if (r == -1) {
+        snprintf(errbuf->str, errbuf->len,
+                 "error opening %s: %s (thread exited?)", meta_dirname, strerror(errno));
+        return -1;
+    }
+    return r;
+}
+
+static int
+get_thread_tgid(int meta_dirfd, pid_t *tgid_out, struct strbuf *errbuf)
+{
+    int r = read_pattern_from_procfile(meta_dirfd, "status", "Tgid: %d", errbuf, tgid_out);
     if (r == -1) {
         return -1;
     } else if (r == 0) {
         snprintf(errbuf->str, errbuf->len,
-                 "no Tgid line in %s", status_fname);
+                 "no Tgid line for thread");
         return -1;
     }
     return 0;
@@ -467,10 +492,6 @@ handle_thread_exit(struct prof_data *state, pid_t tid, struct strbuf *errbuf)
     }
     if (thdata->perf_fd != -1) {
         close(thdata->perf_fd);
-    }
-    if (thdata->tid_fd != -1) {
-        epoll_ctl(state->epoll_fd, EPOLL_CTL_DEL, thdata->tid_fd, NULL);
-        close(thdata->tid_fd);
     }
     bpf_map__delete_elem(state->stack_sample_skel->maps.thread_data, &tid, sizeof(pid_t), 0);
     free(thdata);
@@ -537,7 +558,7 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
         goto out;
     }
 
-    stack_sample_skel = stack_sample_bpf__open_and_load();
+    stack_sample_skel = stack_sample_bpf__open();
     if (stack_sample_skel == NULL) {
         snprintf(errbuf->str, errbuf->len,
                  "failed to open stack sample bpf program: %s", strerror(errno));
@@ -549,6 +570,14 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
     if (r < 0) {
         snprintf(errbuf->str, errbuf->len,
                  "failed to resize thread_pids bpf map: %s", strerror(-r));
+        ret = -1;
+        goto out;
+    }
+
+    r = stack_sample_bpf__load(stack_sample_skel);
+    if (r < 0) {
+        snprintf(errbuf->str, errbuf->len,
+                 "failed to load stack sample bpf program: %s", strerror(errno));
         ret = -1;
         goto out;
     }
@@ -594,29 +623,29 @@ static int
 handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
     int ret;
-    int thread_pidfd = -1;
+    int thread_dirfd = -1;
     int perf_fd = -1;
     pid_t thread_tid = 0;
     struct bpf_link *stack_sample_link = NULL;
 
-    if (msg.ancdata.fd_count != 1) {
+    if (msg.ancdata.fd_count != 0) {
         snprintf(errbuf->str, errbuf->len,
                  "received wrong number of FDs (got %zu)", msg.ancdata.fd_count);
         ret = -1;
         goto out;
     }
-    thread_pidfd = msg.ancdata.fds[0];
 
-    /* validate that the pidfd == the pid we were given */
+    /* Open the proc directory for the thread to get metadata... */
     thread_tid = msg.body.req_newthread.thread_tid;
-    if (validate_pidfd_pid_matches(thread_pidfd, thread_tid, errbuf) == -1) {
+    thread_dirfd = open_thread_metadata_dir(state->caller_pid, thread_tid, errbuf);
+    if (thread_dirfd == -1) {
         ret = -1;
         goto out;
-    }
+    } 
 
     /* verify that this thread belongs to the same process as we're connected to */
     pid_t thread_tgid;
-    if (get_thread_tgid(thread_tid, &thread_tgid, errbuf) == -1) {
+    if (get_thread_tgid(thread_dirfd, &thread_tgid, errbuf) == -1) {
         ret = -1;
         goto out;
     }
@@ -644,16 +673,16 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     perf_attr.config = PERF_COUNT_SW_TASK_CLOCK;
     perf_attr.sample_freq = msg.body.req_newthread.interval_hz;
     perf_attr.freq = 1;
-    perf_fd = perf_event_open(&perf_attr, thread_tid, -1, state->perf_group_fd, PERF_FLAG_FD_CLOEXEC);
+    perf_fd = perf_event_open(&perf_attr, thread_tid, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (perf_fd == -1) {
         snprintf(errbuf->str, errbuf->len,
-                 "perf_event_open(2) for dummy event failed: %s", strerror(errno));
+                 "perf_event_open(2) for software clock event failed: %s", strerror(errno));
         ret = -1;
         goto out;
     }
 
     /* check for pid re-use */
-    if (pidfd_alive(thread_pidfd, thread_tid, errbuf) == -1) {
+    if (thread_metadata_dir_alive(thread_dirfd, thread_tid, errbuf) == -1) {
         ret = -1;
         goto out;
     }
@@ -681,27 +710,10 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
       }
 
 
-    struct thread_data *thdata = xmalloc(sizeof(struct thread_data));
-    struct epoll_event ev;
-    thdata->epoll_data.fd = thread_pidfd;
-    thdata->epoll_data.tid = thread_tid;
-    thdata->epoll_data.fd_type = EPOLL_FD_TYPE_THREAD;
-    ev.events = EPOLLIN | EPOLLERR | EPOLLHUP;
-    ev.data.ptr = &thdata->epoll_data;
-    r = epoll_ctl(state->epoll_fd, EPOLL_CTL_ADD, thdata->tid_fd, &ev);
-    if (r == -1) {
-        snprintf(errbuf->str, errbuf->len,
-                 "failed to epoll_ctl add pidfd: %s", strerror(errno));
-        ret = -1;
-        free(thdata);
-        goto out;
-    }
-
     /* If we got here, save the FDs and null them out so they don't get closed
      * by the out: block */
+    struct thread_data *thdata = xmalloc(sizeof(struct thread_data));
     thdata->tid = thread_tid;
-    thdata->tid_fd = thread_pidfd;
-    thread_pidfd = -1;
     thdata->perf_fd = perf_fd;
     perf_fd = -1;
     thdata->stack_sample_attachment = stack_sample_link;
@@ -725,8 +737,8 @@ out:
     if (stack_sample_link) {
         bpf_link__detach(stack_sample_link);
     }
-    if (thread_pidfd != -1) {
-        close(thread_pidfd);
+    if (thread_dirfd != -1) {
+        close(thread_dirfd);
     }
     if (perf_fd != -1) {
         close(perf_fd);
@@ -812,6 +824,9 @@ run_event_loop(struct prof_data *state, struct strbuf *errbuf)
     while (true) {
         struct epoll_event event;
         int r = epoll_wait(state->epoll_fd, &event, 1, -1);
+        if (r == -1 && errno == EINTR) {
+            continue;
+        }
         if (r == -1) {
             snprintf(errbuf->str, errbuf->len,
                      "failed to poll epoll_wait(2): %s", strerror(errno));
@@ -832,13 +847,6 @@ run_event_loop(struct prof_data *state, struct strbuf *errbuf)
                 break;
             }
             r = handle_message(state, msg, errbuf);
-            if (r == -1) {
-                return -1;
-            }
-            break;
-          case EPOLL_FD_TYPE_THREAD:
-            /* a thread we were following exited */
-            r = handle_thread_exit(state, evdata->tid, errbuf);
             if (r == -1) {
                 return -1;
             }
@@ -874,9 +882,6 @@ cleanup_thread_state_iter(int key, uintptr_t val, void *ctx)
     }
     if (data->perf_fd != -1) {
         close(data->perf_fd);
-    }
-    if (data->tid_fd != -1) {
-        close(data->tid_fd);
     }
     free(data);
     return NUMTABLE_ITER_CONTINUE;
@@ -931,6 +936,13 @@ main(int argc, char **argv)
             fprintf(stderr, "error calling fcntl(2) F_GETFL: %s", strerror(errno));
             exit(1);
         }
+    }
+
+    /* Our socket needs the SO_PASSCRED option set to enable it to receive SCM_CREDENTIALS */
+    int one = 1;
+    if (setsockopt(SOCKET_FD, SOL_SOCKET, SO_PASSCRED, &one, sizeof(int)) == -1) {
+        fprintf(stderr, "error calling setsockopt(2) for SO_PASSCRED: %s", strerror(errno));
+        exit(1);
     }
 
     /* Zero out our state structure */

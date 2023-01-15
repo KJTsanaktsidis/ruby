@@ -35,9 +35,9 @@
  * - profile.so begins by writing a message of type struct perf_helper_req_setup
  *   to the socket.
  *     * It must _ALSO_ include a SCM_CREDENTIALS ancillary message containing the
- *       sending process's pid (its real pid - the thread ID).
+ *       sending process's pid (which, from the kernel's perspective is the tgid).
  *     * It must _ALSO_ include a SCM_RIGHTS ancillary message contianing a pidfd
- *       referring to the calling process (again, the real pid i.e. it's thread)
+ *       referring to the calling process (again, from the kernel's view, the tgid)
  * - In response, the perf_helper program will set up a dummy perf handle to act
  *   as the group leader & also configure all the eBPF maps. It will reply on the
  *   socket with a struct perf_helper_res_setup. It will also include a SCM_RIGHTS
@@ -47,7 +47,6 @@
  * - As threads are created, profile.so will write messages of type struct
  *   perf_helper_req_newthread, for each new thread that is created in the program
  *   (or for existing threads that were around before profiling started).
- *     * It must also send a pidfd for the given thread.
  * - In response, the perf_helper program will set up a new perf handle for the
  *   specified thread, and attach the eBPF sample writer program to it. It will
  *   respond wiht perf_helper_res_newthread and an SCM_RIGHTS ancillary message
