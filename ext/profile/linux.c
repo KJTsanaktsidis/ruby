@@ -10,7 +10,6 @@
 #include <unistd.h>
 
 #include "profile.h"
-#include "linux.h"
 
 VALUE mProfileLinux;
 

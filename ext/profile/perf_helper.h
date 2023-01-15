@@ -1,5 +1,5 @@
-#ifndef __PERF_HELPER_MESSAGE_H
-#define __PERF_HELPER_MESSAGE_H
+#ifndef __PERF_HELPER_H
+#define __PERF_HELPER_H
 
 /* n.b. this is included from both the extension and the perf_helper,
  * so no Ruby includes here */
@@ -137,11 +137,5 @@ struct perf_helper_msg {
     struct perf_helper_msg_body body;
     struct perf_helper_msg_ancdata ancdata;
 };
-
-int read_perf_helper_message(int socket_fd, struct perf_helper_msg *msg_out,
-                             char *errbuf, size_t errbuf_len);
-
-int write_perf_helper_message(int socket_fd, struct perf_helper_msg *msg,
-                               char *errbuf, size_t errbuf_len);
 
 #endif

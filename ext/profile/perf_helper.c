@@ -20,7 +20,7 @@
 
 #include "stack_sample.bpf.h"
 #include "stack_sample.skel.h"
-#include "perf_helper_message.h"
+#include "perf_helper.h"
 
 #define SOCKET_FD 3
 
@@ -292,16 +292,165 @@ pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned int flags)
  * =============================================================================
  */
 
+/* Reads a message from the socket. Returns -1 on error, 0 if there is no
+ * message to be read (either because the socket is nonblocking, or the
+ * remote end is closed), and 1 if a message is returned. */
 static int
 read_socket_message(int socket_fd, struct perf_helper_msg *msg_out, struct strbuf *errbuf)
 {
-    return read_perf_helper_message(socket_fd, msg_out, errbuf->str, errbuf->len);
+    char strerror_buf[256];
+    union {
+        struct cmsghdr align;
+        char buf[
+          /* space for a SCM_CREDENTIALS message */
+          CMSG_SPACE(sizeof(struct ucred)) +
+          /* space for SCM_RIGHTS */
+          CMSG_SPACE(MAX_PERF_HELPER_FDS * sizeof(int))
+        ];
+    } cmsgbuf;
+    memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
+
+    struct iovec iov;
+    iov.iov_base = &msg_out->body;
+    iov.iov_len = sizeof(struct perf_helper_msg_body);
+
+    struct msghdr socket_msg;
+    socket_msg.msg_iov = &iov;
+    socket_msg.msg_iovlen = 1;
+    socket_msg.msg_control = cmsgbuf.buf;
+    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
+    socket_msg.msg_flags = 0;
+
+    int r;
+    while (true) {
+        r = recvmsg(socket_fd, &socket_msg, 0);
+        if (r == -1 && errno == EINTR) {
+            continue;
+        }
+        if (r == -1 && errno == EWOULDBLOCK) {
+            return 0;
+        }
+        if (r == -1) {
+            snprintf(errbuf->str, errbuf->len,
+                     "error reading setup request message: %s",
+                     strerror_r(errno, strerror_buf, sizeof(strerror_buf)));
+            return -1;
+        }
+        if (r == 0) {
+            return 0;
+        }
+        break;
+    }
+
+
+    if (r < (int)sizeof(struct perf_helper_msg_body)) {
+        snprintf(errbuf->str, errbuf->len,
+                 "received message too small (%d bytes)", r);
+        return -1;
+    }
+
+    msg_out->ancdata.have_creds = false;
+    msg_out->ancdata.fd_count = 0;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
+    while (cmsg) {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_CREDENTIALS) {
+            size_t body_len = cmsg->cmsg_len - sizeof(struct cmsghdr);
+            if (body_len != sizeof(struct ucred)) {
+                snprintf(errbuf->str, errbuf->len,
+                         "size of SCM_CREDENTIALS message wrong (got %zu)", body_len);
+                return -1;
+            }
+            memcpy(&msg_out->ancdata.creds, CMSG_DATA(cmsg), cmsg->cmsg_len);
+            msg_out->ancdata.have_creds = true;
+        } else if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+            int num_fds = (cmsg->cmsg_len - sizeof(struct cmsghdr)) / sizeof(int);
+            if (num_fds + msg_out->ancdata.fd_count > MAX_PERF_HELPER_FDS) {
+                snprintf(errbuf->str, errbuf->len,
+                         "too many fds in SCM_RIGHTS message(s)");
+                return -1;
+            }
+            int *fd_mem = msg_out->ancdata.fds + msg_out->ancdata.fd_count;
+            memcpy(fd_mem, CMSG_DATA(cmsg), cmsg->cmsg_len);
+            msg_out->ancdata.fd_count += num_fds;
+        }
+        
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
+    }
+    return 1;
 }
 
+/* Write a message to the socket. Returns 1 if the message was written,
+ * -1 on error, or 0 if the message was not written because it would block
+ *  & the socket is nonblocking (shouldn't be possible - we put the socket
+ *  into blocking mode on startup */
 static int
 write_socket_message(int socket_fd, struct perf_helper_msg *msg, struct strbuf *errbuf)
 {
-    return write_perf_helper_message(socket_fd, msg, errbuf->str, errbuf->len);
+    char strerror_buf[256];
+    union {
+        struct cmsghdr align;
+        char buf[
+          /* space for a SCM_CREDENTIALS message */
+          CMSG_SPACE(sizeof(struct ucred)) +
+          /* space for SCM_RIGHTS */
+          CMSG_SPACE(MAX_PERF_HELPER_FDS * sizeof(int))
+        ];
+    } cmsgbuf;
+    memset(&cmsgbuf.buf, 0, sizeof(cmsgbuf.buf));
+    struct iovec iov;
+    iov.iov_base = &msg->body;
+    iov.iov_len = sizeof(struct perf_helper_msg_body);
+
+    struct msghdr socket_msg;
+    socket_msg.msg_iov = &iov;
+    socket_msg.msg_iovlen = 1;
+    socket_msg.msg_control = cmsgbuf.buf;
+    socket_msg.msg_controllen = sizeof(cmsgbuf.buf);
+    socket_msg.msg_flags = 0;
+
+    size_t controllen = 0;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&socket_msg);
+
+    if (msg->ancdata.have_creds) {
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_CREDENTIALS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+        memcpy(CMSG_DATA(cmsg), &msg->ancdata.creds, sizeof(struct ucred));
+        controllen += CMSG_ALIGN(cmsg->cmsg_len);
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
+    }
+    if (msg->ancdata.fd_count > 0 && msg->ancdata.fd_count < MAX_PERF_HELPER_FDS) {
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        int data_len = msg->ancdata.fd_count * sizeof(int);
+        cmsg->cmsg_len = CMSG_LEN(data_len);
+        memcpy(CMSG_DATA(cmsg), msg->ancdata.fds, data_len);
+        controllen += CMSG_ALIGN(cmsg->cmsg_len);
+        cmsg = CMSG_NXTHDR(&socket_msg, cmsg);
+    }
+    socket_msg.msg_controllen = controllen;
+    if (controllen == 0) {
+        socket_msg.msg_control = NULL;
+    }
+
+    int r;
+    while (true) {
+        r = sendmsg(socket_fd, &socket_msg, 0);
+        if (r == -1 && errno == EINTR) {
+            continue;
+        }
+        if (r == -1 && errno == EWOULDBLOCK) {
+            return 0;
+        }
+        if (r == -1) {
+            snprintf(errbuf->str, errbuf->len,
+                     "sendmsg(2) failed: %s",
+                     strerror_r(errno, strerror_buf, sizeof(strerror_buf)));
+            return -1;
+        }
+        break;
+    }
+    return 1;
 }
 
 /*

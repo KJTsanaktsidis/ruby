@@ -4,6 +4,9 @@
 #include <ruby.h>
 
 extern VALUE mProfile;
+extern VALUE cPerfHelperProxy;
+extern VALUE cProfileSession;
+extern VALUE mProfileLinux;
 
 /* Like ruby_xmalloc, but can be used outside GVL */
 static inline void *
@@ -34,6 +37,10 @@ profile_wrap_fd_in_io(int fd)
     args[1] = for_fd_kwargs;
     return rb_funcallv_kw(rb_cIO, rb_intern("for_fd"), 2, args, RB_PASS_KEYWORDS);
 }
+
+void init_perf_helper_proxy(void);
+void init_profile_session(void);
+void init_profile_linux(void);
 
 #endif
 

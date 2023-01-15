@@ -11,8 +11,6 @@
 #include <sys/types.h>
 
 #include "profile.h"
-#include "profile_session.h"
-#include "perf_helper_proxy.h"
 #include "stack_sample.bpf.h"
 
 VALUE cProfileSession;

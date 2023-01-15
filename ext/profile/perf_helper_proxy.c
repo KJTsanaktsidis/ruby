@@ -16,12 +16,8 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#include "perf_helper_message.h"
+#include "perf_helper.h"
 #include "profile.h"
-#include "profile_session.h"
-#include "perf_helper_proxy.h"
-#include "ruby/internal/symbol.h"
-#include "stack_sample.bpf.h"
 
 VALUE cPerfHelperProxy;
 

@@ -14,10 +14,6 @@
 #include "vm_core.h"
 
 #include "profile.h"
-#include "perf_helper_proxy.h"
-#include "linux.h"
-#include "profile_session.h"
-#include "stack_sample.bpf.h"
 
 VALUE mProfile;
 
