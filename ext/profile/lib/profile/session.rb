@@ -4,8 +4,7 @@ module Profile
   class Session
     def initialize
       @perf_helper = Profile::PerfHelperProxy.new
-      binding.irb
-      @perf_io, @ringbuffer_io = @perf_helper.setup
+      @ringbuffer_io = @perf_helper.setup
       @eventloop_wakepipe_r, @eventloop_wakepipe_w = IO.pipe
       @eventloop_thread = _spawn_eventloop_thread
     rescue
@@ -31,5 +30,7 @@ module Profile
     def stop
       # Todo
     end
+
+    attr_reader :perf_helper
   end
 end

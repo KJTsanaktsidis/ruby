@@ -115,6 +115,9 @@ struct perf_helper_msg_body {
         } req_newthread;
         struct perf_helper_res_newthread {
             pid_t thread_tid;
+            int success;
+            char message[256];
+            size_t message_len;
         } res_newthread;
         struct perf_helper_req_endthread {
             pid_t thread_tid;

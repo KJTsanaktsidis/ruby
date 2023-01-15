@@ -5,6 +5,9 @@ require 'tempfile'
 
 module Profile
   class PerfHelperProxy
+
+    attr_reader :helper_pid
+
     def initialize
       @lock = Mutex.new
       @helper_socket, helper_socket_remote = Socket.socketpair :AF_UNIX, :SOCK_SEQPACKET
@@ -54,8 +57,8 @@ module Profile
       creds_ancdata = Socket::Credentials.for_process.as_ancillary_data
       rights_ancdata = Socket::AncillaryData.unix_rights(self_pidfd)
       _, fds = do_req_res body_bytes, [creds_ancdata, rights_ancdata]
-      # [0] is the perf group fd, [1] is the bpf ringbuffer fd.
-      fds[0..1]
+      # [0] is the bpf ringbuffer fd.
+      fds[0]
     end
 
     def newthread(thread)

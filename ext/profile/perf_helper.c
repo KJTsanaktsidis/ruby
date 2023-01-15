@@ -249,7 +249,6 @@ struct prof_data {
     uint32_t max_threads;
 
     /* Profiling resources */
-    int perf_group_fd;  /* main perf FD that all other perf FDs are a child of */
     struct stack_sample_bpf *stack_sample_skel; /* libbpf program handle */
 
     /* map of per-thread struct thread_data's */
@@ -485,10 +484,11 @@ read_pattern_from_procfile(int at, const char *fname, const char *pattern, struc
 {
     va_list args;
     va_start(args, errbuf);
-    int ret = 0;
+    int ret = 0, err = 0;
     FILE *f = NULL;
     int fd = openat(at, fname, O_RDONLY);
     if (fd == -1) {
+        err = errno;
         snprintf(errbuf->str, errbuf->len,
                  "error opening %s: %s", fname, strerror(errno));
         ret = -1;
@@ -517,6 +517,7 @@ out:
     if (f) {
         fclose(f);
     }
+    errno = err;
     return ret; 
 }
 
@@ -538,8 +539,10 @@ thread_metadata_dir_alive(int meta_dirfd, pid_t tid, struct strbuf *errbuf)
 {
     int f = openat(meta_dirfd, "status", O_RDONLY);
     if (f == -1) {
+        int err = errno;
         snprintf(errbuf->str, errbuf->len,
                  "openat(2) check on thread failed (thread %d exited?): %s", tid, strerror(errno));
+        errno = err;
         return -1;
     }
     close(f);
@@ -592,6 +595,8 @@ validate_creds_match_self(struct ucred creds, struct strbuf *errbuf)
     return 0; 
 }
 
+/* returns -2 if the directory doesn't exist, -1 in some other error case,
+ * or the fd if sucessful */
 static int
 open_thread_metadata_dir(pid_t pid, pid_t tid, struct strbuf *errbuf)
 {
@@ -599,8 +604,10 @@ open_thread_metadata_dir(pid_t pid, pid_t tid, struct strbuf *errbuf)
     snprintf(meta_dirname, sizeof(meta_dirname), "/proc/%d/task/%d", pid, tid);
     int r = open(meta_dirname, O_RDONLY | O_DIRECTORY);
     if (r == -1) {
+        int err = errno;
         snprintf(errbuf->str, errbuf->len,
                  "error opening %s: %s (thread exited?)", meta_dirname, strerror(errno));
+        errno = err;
         return -1;
     }
     return r;
@@ -651,7 +658,6 @@ static int
 handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct strbuf *errbuf)
 {
     int ret;
-    int dummy_fd = -1;
     int caller_pid_fd = -1;
     struct stack_sample_bpf *stack_sample_skel = NULL;
 
@@ -677,32 +683,6 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
     }
     /* also validate uid/gid are the same - this _should_ be a no-op */
     if (validate_creds_match_self(msg.ancdata.creds, errbuf) == -1) {
-        ret = -1;
-        goto out;
-    }
-    
-
-    /* To handle the setup req, we need to set up the eBPF machinery, and a dummy
-     * perf handle we can use as a group leader */
-    struct perf_event_attr dummy_attr = { 0 };
-    dummy_attr.size = sizeof(struct perf_event_attr);
-    dummy_attr.type = PERF_TYPE_SOFTWARE;
-    dummy_attr.config = PERF_COUNT_SW_DUMMY;
-    dummy_attr.sample_freq = 1;
-    dummy_attr.freq = 1;
-    dummy_fd = perf_event_open(&dummy_attr, msg.ancdata.creds.pid, -1, -1, PERF_FLAG_FD_CLOEXEC);
-    if (dummy_fd == -1) {
-        snprintf(errbuf->str, errbuf->len,
-                 "perf_event_open(2) for dummy event failed: %s", strerror(errno));
-        ret = -1;
-        goto out;
-    }
-
-    /* need to re-validate that the pid we just bound dummy_fd to is the same one we had
-     * the pidfd for, and not re-used, by checking the pidfd is still alive */
-    if (pidfd_send_signal(caller_pid_fd, 0, NULL, 0) < 0) {
-        snprintf(errbuf->str, errbuf->len,
-                 "pidfd_send_signal(2) failed (pid %d exited?): %s", msg.ancdata.creds.pid, strerror(errno));
         ret = -1;
         goto out;
     }
@@ -733,8 +713,6 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
 
     /* move all resources over to state so they don't get freed by
      * the out: block below. */
-    state->perf_group_fd = dummy_fd;
-    dummy_fd = -1;
     state->caller_pid_fd = caller_pid_fd;
     caller_pid_fd = -1;
     state->stack_sample_skel = stack_sample_skel;
@@ -745,9 +723,8 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
 
     struct perf_helper_msg res = { 0 };
     res.body.type = PERF_HELPER_MSG_RES_SETUP;
-    res.ancdata.fd_count = 2;
-    res.ancdata.fds[0] = state->perf_group_fd;
-    res.ancdata.fds[1] = bpf_map__fd(state->stack_sample_skel->maps.events);
+    res.ancdata.fd_count = 1;
+    res.ancdata.fds[0] = bpf_map__fd(state->stack_sample_skel->maps.events);
     r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
         ret = -1;
@@ -758,9 +735,6 @@ handle_message_setup(struct prof_data *state, struct perf_helper_msg msg, struct
 out:
     if (stack_sample_skel) {
         stack_sample_bpf__destroy(stack_sample_skel);
-    }
-    if (dummy_fd != -1) {
-        close(dummy_fd);
     }
     if (caller_pid_fd != -1) {
         close(caller_pid_fd);
@@ -776,6 +750,8 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     int perf_fd = -1;
     pid_t thread_tid = 0;
     struct bpf_link *stack_sample_link = NULL;
+    struct perf_helper_msg res = { 0 };
+    res.body.type = PERF_HELPER_MSG_RES_NEWTHREAD;
 
     if (msg.ancdata.fd_count != 0) {
         snprintf(errbuf->str, errbuf->len,
@@ -787,31 +763,53 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     /* Open the proc directory for the thread to get metadata... */
     thread_tid = msg.body.req_newthread.thread_tid;
     thread_dirfd = open_thread_metadata_dir(state->caller_pid, thread_tid, errbuf);
+    if (thread_dirfd == -1 && errno == ENOENT) {
+        /* means that the thread exited before we processed the message (or was totally bogus
+         * to begin with, no way to know). Return a response. */
+        msg.body.res_newthread.success = 0;
+        msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                      sizeof(msg.body.res_newthread.message),
+                                                      "thread %d appeared dead", thread_tid);
+        goto out_respond;
+    }
     if (thread_dirfd == -1) {
         ret = -1;
         goto out;
-    } 
+    }
 
     /* verify that this thread belongs to the same process as we're connected to */
     pid_t thread_tgid;
-    if (get_thread_tgid(thread_dirfd, &thread_tgid, errbuf) == -1) {
+    int r = get_thread_tgid(thread_dirfd, &thread_tgid, errbuf);
+    if (r == -1 && errno == ENOENT) {
+        /* thread might have died between the previous check and this one */
+        msg.body.res_newthread.success = 0;
+        msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                      sizeof(msg.body.res_newthread.message),
+                                                      "thread %d appeared alive then dead",
+                                                      thread_tid);
+        goto out_respond;
+    } else if (r == -1) {
         ret = -1;
         goto out;
     }
 
     if (thread_tgid != state->caller_pid) {
-        snprintf(errbuf->str, errbuf->len,
-                 "thread belongs to a different process (%d, expected %d)",
-                 thread_tgid, state->caller_pid);
-        ret = -1;
-        goto out;
+        /* pid re-use might have happened; this thread ID might now belong to a different
+         * process */
+        msg.body.res_newthread.success = 0;
+        msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                      sizeof(msg.body.res_newthread.message),
+                                                      "thread %d now belongs to pid %d (expected %d); reuse?",
+                                                      thread_tid, thread_tgid, state->caller_pid);
+        goto out_respond;
     }
 
     /* Check if we already have an entry in progress for this pid; if so, close
      * it off. handle_thread_exit will successfully do nothing if we didn't already
      * know about thread_pid. */
-    int r = handle_thread_exit(state, thread_tid, errbuf);
+    r = handle_thread_exit(state, thread_tid, errbuf);
     if (r == -1) {
+        /* this is unexpected and fatal */
         ret = -1;
         goto out;
     } 
@@ -823,18 +821,44 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     perf_attr.sample_freq = msg.body.req_newthread.interval_hz;
     perf_attr.freq = 1;
     perf_fd = perf_event_open(&perf_attr, thread_tid, -1, -1, PERF_FLAG_FD_CLOEXEC);
-    if (perf_fd == -1) {
+    if (perf_fd == -1 && errno == ESRCH) {
+        msg.body.res_newthread.success = 0;
+        msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                      sizeof(msg.body.res_newthread.message),
+                                                      "thread %d exited before perf_event_open",
+                                                      thread_tid);
+        goto out_respond; 
+    }
+    else if (perf_fd == -1) {
         snprintf(errbuf->str, errbuf->len,
                  "perf_event_open(2) for software clock event failed: %s", strerror(errno));
         ret = -1;
         goto out;
     }
 
-    /* check for pid re-use */
-    if (thread_metadata_dir_alive(thread_dirfd, thread_tid, errbuf) == -1) {
+    /* check now that the _thread id_ didn't get re-used (since the start of the function) */
+    r = thread_metadata_dir_alive(thread_dirfd, thread_tid, errbuf);
+    if (r == -1 && errno == ENOENT) {
+        msg.body.res_newthread.success = 0;
+        msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                      sizeof(msg.body.res_newthread.message),
+                                                      "thread %d exited after perf_event_open",
+                                                      thread_tid);
+        goto out_respond; 
+    } else if (r == -1) {
         ret = -1;
         goto out;
     }
+
+    /* and also check that the _pid_ didn't (potentially _before_ the start of the function) */
+    if (pidfd_send_signal(state->caller_pid_fd, 0, NULL, 0) < 0) {
+        snprintf(errbuf->str, errbuf->len,
+                 "pidfd_send_signal(2) failed (pid %d exited?): %s", state->caller_pid,
+                 strerror(errno));
+        ret = -1;
+        goto out;
+    }
+
     
     stack_sample_link = bpf_program__attach_perf_event(state->stack_sample_skel->progs.stack_sample, perf_fd);
     if (!stack_sample_link) {
@@ -869,9 +893,9 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     stack_sample_link = NULL;
     numtable_set(&state->thread_table, thread_tid, (uintptr_t)thdata, NULL);
 
+    res.body.res_newthread.success = 1;
+out_respond:
     /* Send the response message */
-    struct perf_helper_msg res = { 0 };
-    res.body.type = PERF_HELPER_MSG_RES_NEWTHREAD;
     r = write_socket_message(state->socket_fd, &res, errbuf);
     if (r == -1) {
         ret = -1;
@@ -1018,7 +1042,6 @@ init_state(struct prof_data *state)
     state->epoll_fd = -1;
     state->socket_fd = -1;
     state->caller_pid_fd = -1;
-    state->perf_group_fd = -1;
     numtable_init(&state->thread_table, 16);
 }
 
@@ -1042,9 +1065,6 @@ cleanup_state(struct prof_data *state)
     numtable_each(&state->thread_table, cleanup_thread_state_iter, NULL);
     if (state->stack_sample_skel) {
         stack_sample_bpf__destroy(state->stack_sample_skel);
-    }
-    if (state->perf_group_fd != -1) {
-        close(state->perf_group_fd);
     }
     if (state->caller_pid_fd != -1) {
         close(state->caller_pid_fd);
@@ -1070,6 +1090,8 @@ main(int argc, char **argv)
     close(STDOUT_FILENO);
     /* Don't need SIGPIPE, we'll find out that the socket is closed by error handling */
     signal(SIGPIPE, SIG_IGN);
+
+    /* TODO - detach from terminal */
 
     /* Our stderr & socket fds come through as O_NONBLOCK, but we actually expect
      * blocking behaviour in this program */
