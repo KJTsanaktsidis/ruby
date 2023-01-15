@@ -7,7 +7,6 @@ $VPATH << '$(topdir)' << '$(top_srcdir)'
 $defs << '-D_GNU_SOURCE'
 $objs = [
   "linux.#{$OBJEXT}",
-  "perf_helper_message.#{$OBJEXT}",
   "profile.#{$OBJEXT}",
   "profile_session.#{$OBJEXT}",
   "perf_helper_proxy.#{$OBJEXT}"
