@@ -1829,3 +1829,17 @@ rb_profile_frame_full_label(VALUE frame)
         return rb_sprintf("%.*s%"PRIsVALUE, prefix_len, RSTRING_PTR(label), qualified_method_name);
     }
 }
+
+uintptr_t
+rb_cfpbuf_get_cfp_ptr(VALUE thval)
+{
+    rb_thread_t *thread = rb_thread_ptr(thval);
+    return (uintptr_t)&thread->ec->cfp;
+}
+
+uintptr_t
+rb_cfpbuf_get_cfp_base_ptr(VALUE thval)
+{
+    rb_thread_t *thread = rb_thread_ptr(thval);
+    return (uintptr_t)(thread->ec->vm_stack + thread->ec->vm_stack_size); 
+}
