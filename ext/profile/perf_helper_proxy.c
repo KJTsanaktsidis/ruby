@@ -7,6 +7,7 @@
 #include <linux/sched.h>
 #include <ruby.h>
 #include <ruby/atomic.h>
+#include <ruby/debug.h>
 #include <ruby/io.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -47,9 +48,11 @@ helper_proxy_pack_msg_newthread(VALUE self, VALUE params)
 
     VALUE interval_hz = Qnil;
     VALUE tid = Qnil;
+    VALUE thread = Qnil;
     if (RB_TEST(params)) {
         interval_hz = rb_hash_aref(params, rb_id2sym(rb_intern("interval_hz")));
         tid = rb_hash_aref(params, rb_id2sym(rb_intern("tid")));
+        thread = rb_hash_aref(params, rb_id2sym(rb_intern("thread")));
     }
 
     if (RB_TEST(interval_hz)) {
@@ -57,6 +60,11 @@ helper_proxy_pack_msg_newthread(VALUE self, VALUE params)
     }
     if (RB_TEST(tid)) {
         msg.req_newthread.thread_tid = RB_NUM2INT(tid);
+    }
+
+    if (RB_TEST(thread)) {
+        msg.req_newthread.ruby_cfp_ptr = rb_cfpbuf_get_cfp_ptr(thread);
+        msg.req_newthread.ruby_cfp_base_ptr = rb_cfpbuf_get_cfp_base_ptr(thread);
     }
 
     return rb_str_new((const char *)&msg, sizeof(struct perf_helper_msg_body));

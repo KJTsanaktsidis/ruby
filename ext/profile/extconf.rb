@@ -12,6 +12,7 @@ $objs = [
   "perf_helper_proxy.#{$OBJEXT}"
 ]
 
+dir_config 'libbpf'
 have_library 'bpf'
 append_cflags '-fvisibility=hidden'
 create_header

@@ -662,6 +662,10 @@ void rb_thread_add_event_hook2(VALUE thval, rb_event_hook_func_t func, rb_event_
 
 /** @endcond */
 
+
+uintptr_t rb_cfpbuf_get_cfp_ptr(VALUE thval);
+uintptr_t rb_cfpbuf_get_cfp_base_ptr(VALUE thval);
+
 RBIMPL_SYMBOL_EXPORT_END()
 
 #endif /* RUBY_DEBUG_H */

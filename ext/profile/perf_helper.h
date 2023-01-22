@@ -110,7 +110,8 @@ struct perf_helper_msg_body {
         struct perf_helper_res_setup { } res_setup;
         struct perf_helper_req_newthread {
             pid_t thread_tid;
-            uintptr_t ruby_stack_ptr;
+            uintptr_t ruby_cfp_ptr;
+            uintptr_t ruby_cfp_base_ptr;
             int interval_hz;
         } req_newthread;
         struct perf_helper_res_newthread {

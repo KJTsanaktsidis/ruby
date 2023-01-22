@@ -902,7 +902,8 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
 
     struct stack_sample_thread_data map_data;
     map_data.pid = thread_tid;
-    map_data.ruby_stack_ptr = msg.body.req_newthread.ruby_stack_ptr;
+    map_data.ruby_cfp_ptr = msg.body.req_newthread.ruby_cfp_ptr;
+    map_data.ruby_cfp_base_ptr = msg.body.req_newthread.ruby_cfp_base_ptr;
     r = bpf_map__update_elem(state->stack_sample_skel->maps.thread_data, &thread_tid, sizeof(pid_t),
                              &map_data, sizeof(struct stack_sample_thread_data),
                              0);

@@ -23,12 +23,14 @@ SEC("perf_event")
 int
 stack_sample(struct bpf_perf_event_data *ctx)
 {
-    struct stack_sample_entry *event;
-
-    event = bpf_ringbuf_reserve(&events, sizeof(struct stack_sample_entry), 0);
-    if (!event) {
-        return 1;
+    struct bpf_dynptr event_ptr;
+    int r = bpf_ringbuf_reserve_dynptr(&events, sizeof(struct stack_sample_entry), 0, &event_ptr);
+    if (r == -1) {
+        bpf_ringbuf_discard_dynptr(&event_ptr, 0);
+        return -1;
     }
+    struct stack_sample_entry *event = event_ptr->data;
+
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tid = pid_tgid & 0xFFFFFFFF;
     event->pid = pid_tgid >> 32;
@@ -46,6 +48,6 @@ stack_sample(struct bpf_perf_event_data *ctx)
         event->stack_ptr = 0x12345678;
     }
 
-    bpf_ringbuf_submit(event, 0);
+    bpf_ringbuf_submit_dynptr(&event_ptr, 0);
     return 0;
 }
