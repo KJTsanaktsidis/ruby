@@ -22,7 +22,7 @@
 VALUE cPerfHelperProxy;
 
 static VALUE
-helper_proxy_s_pack_msg_setup(VALUE self, VALUE params)
+helper_proxy_pack_msg_setup(VALUE self, VALUE params)
 {
     struct perf_helper_msg_body msg = { 0 };
     msg.type = PERF_HELPER_MSG_REQ_SETUP;
@@ -40,7 +40,7 @@ helper_proxy_s_pack_msg_setup(VALUE self, VALUE params)
 }
 
 static VALUE
-helper_proxy_s_pack_msg_newthread(VALUE self, VALUE params)
+helper_proxy_pack_msg_newthread(VALUE self, VALUE params)
 {
     struct perf_helper_msg_body msg = { 0 };
     msg.type = PERF_HELPER_MSG_REQ_NEWTHREAD;
@@ -63,7 +63,7 @@ helper_proxy_s_pack_msg_newthread(VALUE self, VALUE params)
 }
 
 static VALUE
-helper_proxy_s_pack_msg_endthread(VALUE self, VALUE params)
+helper_proxy_pack_msg_endthread(VALUE self, VALUE params)
 {
     struct perf_helper_msg_body msg = { 0 };
     msg.type = PERF_HELPER_MSG_REQ_ENDTHREAD;
@@ -81,7 +81,7 @@ helper_proxy_s_pack_msg_endthread(VALUE self, VALUE params)
 }
 
 static VALUE
-helper_proxy_s_get_ext_path(VALUE self)
+helper_proxy_get_ext_path(VALUE self)
 {
     Dl_info info;
     int r = dladdr(init_perf_helper_proxy, &info);
@@ -94,8 +94,8 @@ helper_proxy_s_get_ext_path(VALUE self)
 void init_perf_helper_proxy(void)
 {
     cPerfHelperProxy = rb_define_class_under(mProfile, "PerfHelperProxy", rb_cObject);
-    rb_define_method(cPerfHelperProxy, "_pack_msg_setup", helper_proxy_s_pack_msg_setup, 1);
-    rb_define_method(cPerfHelperProxy, "_pack_msg_newthread", helper_proxy_s_pack_msg_newthread, 1);
-    rb_define_method(cPerfHelperProxy, "_pack_msg_endthread", helper_proxy_s_pack_msg_endthread, 1);
-    rb_define_method(cPerfHelperProxy, "_get_ext_path", helper_proxy_s_get_ext_path, 0);
+    rb_define_method(cPerfHelperProxy, "_pack_msg_setup", helper_proxy_pack_msg_setup, 1);
+    rb_define_method(cPerfHelperProxy, "_pack_msg_newthread", helper_proxy_pack_msg_newthread, 1);
+    rb_define_method(cPerfHelperProxy, "_pack_msg_endthread", helper_proxy_pack_msg_endthread, 1);
+    rb_define_method(cPerfHelperProxy, "_get_ext_path", helper_proxy_get_ext_path, 0);
 }

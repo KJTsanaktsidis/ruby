@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -226,6 +227,8 @@ struct thread_data {
 
     /* perf_event_open handle for this thread */
     int perf_fd;
+    /* open directory pointing to /proc/pid/tasks/tid */
+    int meta_dirfd;
 
     /* libbpf link (attachment to perf_fd) */
     struct bpf_link *stack_sample_attachment;
@@ -401,6 +404,8 @@ write_socket_message(int socket_fd, struct perf_helper_msg *msg, struct strbuf *
     iov.iov_len = sizeof(struct perf_helper_msg_body);
 
     struct msghdr socket_msg;
+    socket_msg.msg_name = NULL;
+    socket_msg.msg_namelen = 0;
     socket_msg.msg_iov = &iov;
     socket_msg.msg_iovlen = 1;
     socket_msg.msg_control = cmsgbuf.buf;
@@ -649,6 +654,9 @@ handle_thread_exit(struct prof_data *state, pid_t tid, struct strbuf *errbuf)
     if (thdata->perf_fd != -1) {
         close(thdata->perf_fd);
     }
+    if (thdata->meta_dirfd != -1) {
+        close(thdata->meta_dirfd);
+    }
     bpf_map__delete_elem(state->stack_sample_skel->maps.thread_data, &tid, sizeof(pid_t), 0);
     free(thdata);
     return 0;
@@ -804,15 +812,38 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
         goto out_respond;
     }
 
-    /* Check if we already have an entry in progress for this pid; if so, close
-     * it off. handle_thread_exit will successfully do nothing if we didn't already
-     * know about thread_pid. */
-    r = handle_thread_exit(state, thread_tid, errbuf);
-    if (r == -1) {
-        /* this is unexpected and fatal */
-        ret = -1;
-        goto out;
-    } 
+    /* Check if we already have a profiling handle for this thread id */
+    uintptr_t existing_entry_ptr;
+    r = numtable_get(&state->thread_table, thread_tid, &existing_entry_ptr);
+    if (r == NUMTABLE_FOUND) {
+        struct thread_data *existing_entry = (struct thread_data *)existing_entry_ptr;
+        /* stat our directory & their directory and see if it's the same one */
+        struct stat existing_stat;
+        struct stat new_stat;
+        int r1, r2;
+        r1 = fstat(thread_dirfd, &new_stat);
+        r2 = fstat(existing_entry->meta_dirfd, &existing_stat);
+        if (r1 == -1 || r2 == -1) {
+            msg.body.res_newthread.success = 0;
+            msg.body.res_newthread.message_len = snprintf(msg.body.res_newthread.message,
+                                                          sizeof(msg.body.res_newthread.message),
+                                                          "thread %d stat failed\n",
+                                                          thread_tid);
+            goto out_respond;
+        }
+        if (existing_stat.st_dev == new_stat.st_dev && existing_stat.st_ino == new_stat.st_ino) {
+            /* This means we're calling newthread for a thread we're already tracking */
+            msg.body.res_newthread.success = 1;
+            goto out_respond;
+        }
+        /* Otherwise they're different, close off the existing one */
+        r = handle_thread_exit(state, thread_tid, errbuf);
+        if (r == -1) {
+            /* this is unexpected and fatal */
+            ret = -1;
+            goto out;
+        }
+    }
 
     struct perf_event_attr perf_attr = { 0 };
     perf_attr.size = sizeof(struct perf_event_attr);
@@ -889,6 +920,8 @@ handle_message_newthread(struct prof_data *state, struct perf_helper_msg msg, st
     thdata->tid = thread_tid;
     thdata->perf_fd = perf_fd;
     perf_fd = -1;
+    thdata->meta_dirfd = thread_dirfd;
+    thread_dirfd = -1;
     thdata->stack_sample_attachment = stack_sample_link;
     stack_sample_link = NULL;
     numtable_set(&state->thread_table, thread_tid, (uintptr_t)thdata, NULL);

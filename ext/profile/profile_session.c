@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <ruby.h>
 #include <ruby/atomic.h>
+#include <ruby/debug.h>
 #include <ruby/io.h>
 #include <ruby/thread.h>
 #include <sys/epoll.h>
@@ -65,7 +66,7 @@ static int
 ringbuf_event_handler(void *ctx, void *data, size_t size)
 {
     struct stack_sample_entry *entry = data;
-    fprintf(stderr, "an event: pid %u, sample %llu\n", entry->pid, entry->sample_period);
+    fprintf(stderr, "an event: pid %u tid %u, sample %llu\n", entry->pid, entry->tid, entry->sample_period);
     return 0;
 }
 

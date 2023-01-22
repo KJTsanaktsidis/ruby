@@ -29,8 +29,9 @@ stack_sample(struct bpf_perf_event_data *ctx)
     if (!event) {
         return 1;
     }
-    __u32 tid = bpf_get_current_pid_tgid() | 0xFFFFFFFF;
-    event->pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tid = pid_tgid & 0xFFFFFFFF;
+    event->pid = pid_tgid >> 32;
     event->tid = tid;
     event->cpu_id = bpf_get_smp_processor_id();
     event->sample_period = ctx->sample_period;

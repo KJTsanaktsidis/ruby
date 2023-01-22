@@ -62,7 +62,6 @@ module Profile
     end
 
     def newthread(thread)
-      puts "req'ing for #{thread.native_thread_id} (pid #{Process.pid})"
       body_bytes = _pack_msg_newthread({
         interval_hz: 50,
         tid: thread.native_thread_id
@@ -70,23 +69,11 @@ module Profile
       do_req_res body_bytes
     end
 
-    def endthread
+    def endthread(thread)
       body_bytes = _pack_msg_endthread({
-        interval_hz: 50,
-        tid: Thread.current.native_thread_id
+        tid: thread.native_thread_id
       })
-
-      @lock.synchronize do
-        begin
-          @helper_socket.sendmsg body_bytes
-          recvd_msg = @helper_socket.recvmsg
-        rescue
-          reap_and_raise or raise
-        end
-        if recvd_msg.size == 0
-          reap_and_raise or raise "unexpected EOF when reading from perf_helper"
-        end
-      end
+      do_req_res body_bytes
     end
 
     private
