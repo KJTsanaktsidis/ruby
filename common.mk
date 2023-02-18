@@ -115,6 +115,7 @@ COMMONOBJS    = array.$(OBJEXT) \
 		object.$(OBJEXT) \
 		pack.$(OBJEXT) \
 		parse.$(OBJEXT) \
+		perf_trampoline.$(OBJEXT) \
 		proc.$(OBJEXT) \
 		process.$(OBJEXT) \
 		ractor.$(OBJEXT) \
