@@ -40,6 +40,7 @@
 #include "vm_insnhelper.h"
 #include "ractor_core.h"
 #include "vm_sync.h"
+#include "perf_trampoline.h"
 
 #include "builtin.h"
 
@@ -4050,6 +4051,8 @@ Init_BareVM(void)
     rb_native_mutex_initialize(&vm->ractor.sync.lock);
     rb_native_cond_initialize(&vm->ractor.sync.barrier_cond);
     rb_native_cond_initialize(&vm->ractor.sync.terminate_cond);
+
+    Init_perf_trampoline_allocator(vm);
 }
 
 #ifndef _WIN32

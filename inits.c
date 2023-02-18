@@ -14,6 +14,7 @@
 #include "builtin.h"
 static void Init_builtin_prelude(void);
 #include "prelude.rbinc"
+#include "perf_trampoline.h"
 
 #define CALL(n) {void Init_##n(void); Init_##n();}
 
@@ -79,6 +80,7 @@ rb_call_inits(void)
     CALL(ast);
     CALL(gc_stress);
     CALL(shape);
+    CALL(perf_trampoline_debug);
 
     // enable builtin loading
     CALL(builtin);
