@@ -747,6 +747,7 @@ typedef struct rb_vm_struct {
         size_t fiber_machine_stack_size;
     } default_params;
 
+    struct perf_trampoline_allocator *perf_trampoline_allocator;
 } rb_vm_t;
 
 /* default values */
