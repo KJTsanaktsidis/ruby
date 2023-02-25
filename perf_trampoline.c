@@ -227,7 +227,10 @@ bitmap_tree_free_slot(struct bitmap_tree *tree, long slot)
     }
 }
 
+/* The trampoline allocator itself */
+
 struct perf_trampoline_allocator {
+    bool enabled;
     int memfd;
     trampoline_bytes_t *trampoline_slots_w;
     trampoline_bytes_t *trampoline_slots_x;
@@ -236,9 +239,23 @@ struct perf_trampoline_allocator {
     struct bitmap_tree slot_tree;
 };
 
+static void
+destroy_allocator(struct perf_trampoline_allocator *al)
+{
+    bitmap_tree_destroy(&al->slot_tree);
+    if (al->trampoline_slots_w != MAP_FAILED) {
+        munmap(al->trampoline_slots_w, al->trampoline_slots_len);
+    }
+    if (al->trampoline_slots_x != MAP_FAILED) {
+        munmap(al->trampoline_slots_x, al->trampoline_slots_len);
+    }
+    if (al->memfd != -1) {
+        close(al->memfd);
+    } 
+}
 
 
-void
+static void
 init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
 {
     char errmsg[256];
@@ -247,6 +264,7 @@ init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
     al->trampoline_slots_w = MAP_FAILED;
     al->trampoline_slots_x = MAP_FAILED;
     al->trampoline_slots_len = 0;
+    al->enabled = false;
     memset(&al->slot_tree, 0, sizeof(al->slot_tree));
 
     /* Create the memory region that will hold the perf trampolines themselves */
@@ -286,31 +304,32 @@ init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
     /* Setup the bitmap tree we will use to work out where free slots are located */
     bitmap_tree_initialize(&al->slot_tree, al->trampoline_slots_count);
 
+    al->enabled = true;
     return;
 error:
-    bitmap_tree_destroy(&al->slot_tree);
-    if (al->trampoline_slots_w != MAP_FAILED) {
-        munmap(al->trampoline_slots_w, al->trampoline_slots_len);
-    }
-    if (al->trampoline_slots_x != MAP_FAILED) {
-        munmap(al->trampoline_slots_x, al->trampoline_slots_len);
-    }
-    if (al->memfd != -1) {
-        close(al->memfd);
-    }
+    destroy_allocator(al);
     fprintf(stderr, "%s\n", errmsg);
     exit(1);
 }
 
 
+struct perf_trampoline_allocator *
+rb_perf_trampoline_allocator_init(void)
+{
+    struct perf_trampoline_allocator *al = calloc(1, sizeof(struct perf_trampoline_allocator));
+    init_allocator(al, 1024 * 1024 * 10);
+    return al;
+}
 
 void
-Init_perf_trampoline_allocator(rb_vm_t *vm)
+rb_perf_trampoline_allocator_destroy(struct perf_trampoline_allocator *al)
 {
-    vm->perf_trampoline_allocator = xcalloc(1, sizeof(struct perf_trampoline_allocator));
-    init_allocator(vm->perf_trampoline_allocator, 1024 * 1024 * 10);
-    return;
+    if (al) {
+        destroy_allocator(al);
+        free(al);
+    }
 }
+
 
 /**** DEBUGGING HACKS ****/
 

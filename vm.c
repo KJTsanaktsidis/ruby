@@ -2919,6 +2919,9 @@ ruby_vm_destruct(rb_vm_t *vm)
             vm->frozen_strings = 0;
         }
         RB_ALTSTACK_FREE(vm->main_altstack);
+        if (vm->perf_trampoline_allocator) {
+            rb_perf_trampoline_allocator_destroy(vm->perf_trampoline_allocator);
+        }
         if (objspace) {
             rb_objspace_free(objspace);
         }
@@ -4036,6 +4039,7 @@ Init_BareVM(void)
     vm->negative_cme_table = rb_id_table_create(16);
     vm->overloaded_cme_table = st_init_numtable();
     vm->constant_cache = rb_id_table_create(0);
+    vm->perf_trampoline_allocator = rb_perf_trampoline_allocator_init();
 
     // setup main thread
     th->nt = ZALLOC(struct rb_native_thread);
@@ -4051,8 +4055,6 @@ Init_BareVM(void)
     rb_native_mutex_initialize(&vm->ractor.sync.lock);
     rb_native_cond_initialize(&vm->ractor.sync.barrier_cond);
     rb_native_cond_initialize(&vm->ractor.sync.terminate_cond);
-
-    Init_perf_trampoline_allocator(vm);
 }
 
 #ifndef _WIN32
