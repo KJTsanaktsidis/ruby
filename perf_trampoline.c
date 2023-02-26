@@ -10,6 +10,7 @@
 #include "ccan/list/list.h"
 #include "perf_trampoline.h"
 #include "ruby.h"
+#include "ruby/internal/value.h"
 #include "vm_core.h"
 #include "vm_callinfo.h"
 
@@ -116,25 +117,25 @@ struct bitmap_tree {
 static inline uint64_t
 log2_floor(uint64_t n)
 {
-    return 64u - __builtin_clzl(n) - 1;
+    return 64ul - __builtin_clzl(n) - 1ul;
 }
 
 static inline uint64_t
 log2_ceil(uint64_t n)
 {
-    return log2_floor(n - 1) + 1;
+    return log2_floor(n - 1ul) + 1ul;
 }
 
 static inline uint64_t
 div_ceil(uint64_t a, uint64_t b)
 {
-    return (a / b) + ((a % b) ? 1 : 0);
+    return (a / b) + ((a % b) ? 1ul : 0);
 }
 
 static inline uint64_t
 pow64n(uint64_t n)
 {
-    return 1 << (6 * n);
+    return 1ul << (6ul * n);
 }
 
 static void
@@ -160,10 +161,12 @@ bitmap_tree_initialize(struct bitmap_tree *tree, long capa)
     for (long i = 0; i < tree->depth; i++) {
         struct bitmap_tree_level *level = &tree->levels[i];
         long num_rightmost_bits_to_set = (level->len * 64) - level->valid_bits;
-        uint64_t mask = 0xFFFFFFFFFFFFFFFF >> (64 - num_rightmost_bits_to_set);
-        mask = mask << (64 - num_rightmost_bits_to_set);
-        long last_element_index = level->offset + level-> len - 1;
-        tree->elements[last_element_index] |= mask;
+        if (num_rightmost_bits_to_set != 0) {
+            uint64_t mask = UINT64_MAX >> (64ul - num_rightmost_bits_to_set);
+            mask = mask << (64ul - num_rightmost_bits_to_set);
+            long last_element_index = level->offset + level-> len - 1ul;
+            tree->elements[last_element_index] |= mask;
+        }
     }
 }
 
@@ -184,7 +187,7 @@ bitmap_tree_take_slot(struct bitmap_tree *tree)
         struct bitmap_tree_level *level = &tree->levels[i];
         long bitmap_index = level->offset + slot_at_this_level;
         uint64_t bitmap = tree->elements[bitmap_index];
-        if (bitmap == 0xFFFFFFFFFFFFFFFF) {
+        if (bitmap == UINT64_MAX) {
             /* This means the bitmap tree is full */
             return -1;
         }
@@ -198,8 +201,8 @@ bitmap_tree_take_slot(struct bitmap_tree *tree)
         long selected_bitmap = bit_path[i] / 64;
         long selected_bit = bit_path[i] % 64;
         uint64_t *bitmap = &tree->elements[level->offset + selected_bitmap];
-        *bitmap |= (1 << selected_bit);
-        if (*bitmap != 0xFFFFFFFFFFFFFFFF) {
+        *bitmap |= (1ul << selected_bit);
+        if (*bitmap != UINT64_MAX) {
             /* If a bitmap is not full, don't continue traversing upwards and marking */
             break;
         }
@@ -216,8 +219,8 @@ bitmap_tree_free_slot(struct bitmap_tree *tree, long slot)
         long selected_bitmap = bit_at_this_level / 64;
         long selected_bit = bit_at_this_level % 64;
         uint64_t *bitmap = &tree->elements[level->offset + selected_bitmap];
-        bool was_full = (*bitmap == 0xFFFFFFFFFFFFFFFF);
-        *bitmap &= ~(1 << selected_bit);
+        bool was_full = (*bitmap == UINT64_MAX);
+        *bitmap &= ~(1ul << selected_bit);
         if (!was_full) {
             /* early exit; no need to keep looking up if we weren't full, because the level up
              * would be unset anyway */
@@ -227,31 +230,47 @@ bitmap_tree_free_slot(struct bitmap_tree *tree, long slot)
     }
 }
 
+static long
+bitmap_tree_count_in_range(struct bitmap_tree *tree, long range_start, long range_end)
+{
+    long ret = 0;
+    long ix_start = range_start / 64;
+    long ix_end = div_ceil(range_end, 64);
+    long start_rem = range_start % 64;
+    long end_rem = range_end % 64;
+    for (long i = ix_start; i < ix_end; i++) {
+        uint64_t mask = UINT64_MAX;
+        if (i == ix_start && start_rem != 0) {
+            mask &= ~(UINT64_MAX << start_rem);
+        }
+        if (i == (ix_end - 1) && end_rem != 0) {
+            mask &= ~(UINT64_MAX >> end_rem);
+        }
+        struct bitmap_tree_level *level = &tree->levels[tree->depth - 1];
+        uint64_t bitmap = tree->elements[level->offset + i];
+        ret += __builtin_popcountl(bitmap & mask);
+    }
+    return ret;
+};
+
 /* The trampoline allocator itself */
 
 struct perf_trampoline_allocator {
     bool enabled;
-    int memfd;
-    trampoline_bytes_t *trampoline_slots_w;
-    trampoline_bytes_t *trampoline_slots_x;
+    trampoline_bytes_t *trampoline_slots;
     long trampoline_slots_count;
     size_t trampoline_slots_len;
     struct bitmap_tree slot_tree;
+    uint64_t *page_setup_bitmap;
 };
 
 static void
 destroy_allocator(struct perf_trampoline_allocator *al)
 {
     bitmap_tree_destroy(&al->slot_tree);
-    if (al->trampoline_slots_w != MAP_FAILED) {
-        munmap(al->trampoline_slots_w, al->trampoline_slots_len);
+    if (al->trampoline_slots != MAP_FAILED) {
+        munmap(al->trampoline_slots, al->trampoline_slots_len);
     }
-    if (al->trampoline_slots_x != MAP_FAILED) {
-        munmap(al->trampoline_slots_x, al->trampoline_slots_len);
-    }
-    if (al->memfd != -1) {
-        close(al->memfd);
-    } 
 }
 
 
@@ -260,43 +279,19 @@ init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
 {
     char errmsg[256];
 
-    al->memfd = -1;
-    al->trampoline_slots_w = MAP_FAILED;
-    al->trampoline_slots_x = MAP_FAILED;
+    al->trampoline_slots = MAP_FAILED;
     al->trampoline_slots_len = 0;
     al->enabled = false;
     memset(&al->slot_tree, 0, sizeof(al->slot_tree));
 
     /* Create the memory region that will hold the perf trampolines themselves */
-    al->memfd = memfd_create("perf_trampoline_allocator", MFD_CLOEXEC);
-    if (al->memfd == -1) {
-        snprintf(errmsg, sizeof(errmsg),
-                 "failed memfd_create(2) for perf trampoline allocator: %s",
-                 strerrorname_np(errno));
-        goto error;
-    }
     al->trampoline_slots_count = max_trampolines;
     al->trampoline_slots_len = max_trampolines * sizeof(trampoline_bytes_t);
-    int r = ftruncate(al->memfd, al->trampoline_slots_len);
-    if (r == -1) {
+    al->trampoline_slots = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_WRITE,
+                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (al->trampoline_slots == MAP_FAILED) {
         snprintf(errmsg, sizeof(errmsg),
-                 "failed ftruncate(2) for perf trampoline allocator: %s",
-                 strerrorname_np(errno));
-        goto error;
-    }
-    al->trampoline_slots_w = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_WRITE,
-                                         MAP_SHARED, al->memfd, 0);
-    if (al->trampoline_slots_w == MAP_FAILED) {
-        snprintf(errmsg, sizeof(errmsg),
-                 "failed mmap(2) for perf trampoline allocator writable mapping: %s",
-                 strerrorname_np(errno));
-        goto error;
-    }
-    al->trampoline_slots_x = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_EXEC,
-                                         MAP_SHARED, al->memfd, 0);
-    if (al->trampoline_slots_x == MAP_FAILED) {
-        snprintf(errmsg, sizeof(errmsg),
-                 "failed mmap(2) for perf trampoline allocator executable mapping: %s",
+                 "failed mmap(2) for perf trampoline allocator mapping: %s",
                  strerrorname_np(errno));
         goto error;
     }
@@ -386,6 +381,14 @@ bitmap_tree_rb_free_slot(VALUE self, VALUE slot)
     return Qnil;
 }
 
+static VALUE
+bitmap_tree_rb_count_in_range(VALUE self, VALUE range_start, VALUE range_end)
+{
+    struct bitmap_tree *tree;
+    TypedData_Get_Struct(self, struct bitmap_tree, &bitmap_tree_rb_type, tree);
+    long ret = bitmap_tree_count_in_range(tree, RB_NUM2LONG(range_start), RB_NUM2LONG(range_end));
+    return RB_LONG2NUM(ret);
+}
 
 void
 Init_perf_trampoline_debug(void)
@@ -395,4 +398,5 @@ Init_perf_trampoline_debug(void)
     rb_define_method(cBitmapTree, "initialize", bitmap_tree_rb_initialize, 1);
     rb_define_method(cBitmapTree, "take_slot", bitmap_tree_rb_take_slot, 0);
     rb_define_method(cBitmapTree, "free_slot", bitmap_tree_rb_free_slot, 1);
+    rb_define_method(cBitmapTree, "count_in_range", bitmap_tree_rb_count_in_range, 2);
 }
