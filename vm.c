@@ -397,9 +397,6 @@ mjit_check_iseq(rb_execution_context_t *ec, const rb_iseq_t *iseq, struct rb_ise
       case MJIT_FUNC_NOT_COMPILED:
         if (body->total_calls == mjit_opts.call_threshold) {
             rb_mjit_add_iseq_to_process(iseq);
-            if (UNLIKELY(mjit_opts.wait && !MJIT_FUNC_STATE_P(body->jit_func))) {
-                return body->jit_func(ec, ec->cfp);
-            }
         }
         break;
       case MJIT_FUNC_COMPILING:
@@ -409,6 +406,7 @@ mjit_check_iseq(rb_execution_context_t *ec, const rb_iseq_t *iseq, struct rb_ise
     return Qundef;
 }
 
+MJIT_FUNC_EXPORTED VALUE rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp);
 // Try to execute the current iseq in ec.  Use JIT code if it is ready.
 // If it is not, add ISEQ to the compilation queue and return Qundef for MJIT.
 // YJIT compiles on the thread running the iseq.
@@ -422,32 +420,50 @@ jit_exec(rb_execution_context_t *ec)
     if (yjit_enabled || mjit_call_p) {
         body->total_calls++;
     }
-    else {
+    else if (!(GET_VM()->perf_trampoline_allocator)) {
         return Qundef;
     }
 
     // Trigger JIT compilation as needed
-    jit_func_t func;
+    jit_func_t func = 0;
     if (yjit_enabled) {
         if (body->total_calls == rb_yjit_call_threshold())  {
-            // If we couldn't generate any code for this iseq, then return
-            // Qundef so the interpreter will handle the call.
-            if (!rb_yjit_compile_iseq(iseq, ec)) {
-                return Qundef;
-            }
+            // If we couldn't generate any code for this iseq, we will notice
+            // that body->jit_func is still 0, and so return
+            // Qundef so the interpreter (or a trampoline, if enabled)
+            // will handle the call.
+            rb_yjit_compile_iseq(iseq, ec);
         }
-        // YJIT tried compiling this function once before and couldn't do
-        // it, so return Qundef so the interpreter handles it.
-        if ((func = body->jit_func) == 0) {
-            return Qundef;
-        }
+        // func might be valid (if YJIT compiled this function before), or
+        // might not (call threshold not hit or codegen failed).
+        func = body->jit_func;
     }
-    else if (UNLIKELY(MJIT_FUNC_STATE_P(func = body->jit_func))) {
-        return mjit_check_iseq(ec, iseq, body);
+    else if (mjit_enabled) {
+        if (UNLIKELY(MJIT_FUNC_STATE_P(body->jit_func))) {
+            mjit_check_iseq(ec, iseq, body);
+            if (UNLIKELY(!MJIT_FUNC_STATE_P(body->jit_func))) {
+                /* mjit compilation happened synchronously */
+                func = body->jit_func;
+            }
+        } else {
+            /* already compiled mjit function */
+            func = body->jit_func;
+        }
     }
 
-    // Call the JIT code
-    return func(ec, ec->cfp); // SystemV x64 calling convention: ec -> RDI, cfp -> RSI
+    if (func == 0 && GET_VM()->perf_trampoline_allocator) {
+        /* No jit function, so insert a trampoline to make the C stack line up with
+           the VM stack */
+        func = rb_vm_jit_func_trampoline;
+    }
+
+    if (func) {
+        // Call the JIT code
+        return func(ec, ec->cfp); // SystemV x64 calling convention: ec -> RDI, cfp -> RSI
+    } else {
+        /* return control to the interpreter */
+        return Qundef;
+    }
 }
 #endif
 
@@ -460,7 +476,18 @@ jit_exec(rb_execution_context_t *ec)
 #include "vm_method.c"
 #endif /* #ifndef MJIT_HEADER */
 #include "vm_eval.c"
+
 #ifndef MJIT_HEADER
+
+MJIT_FUNC_EXPORTED VALUE
+rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp) {
+  if (!VM_FRAME_FINISHED_P(ec->cfp)) {
+    VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);
+    return vm_exec(ec, false);
+  } else {
+    return vm_exec_core(ec, 0);
+  }
+}
 
 #define PROCDEBUG 0
 
