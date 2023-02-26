@@ -1808,6 +1808,8 @@ VALUE rb_catch_protect(VALUE t, rb_block_call_func *func, VALUE data, enum ruby_
 
 rb_execution_context_t *rb_vm_main_ractor_ec(rb_vm_t *vm); // ractor.c
 
+MJIT_FUNC_EXPORTED VALUE rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp);
+
 /* for thread */
 
 #if RUBY_VM_THREAD_MODEL == 2

@@ -406,7 +406,6 @@ mjit_check_iseq(rb_execution_context_t *ec, const rb_iseq_t *iseq, struct rb_ise
     return Qundef;
 }
 
-MJIT_FUNC_EXPORTED VALUE rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp);
 // Try to execute the current iseq in ec.  Use JIT code if it is ready.
 // If it is not, add ISEQ to the compilation queue and return Qundef for MJIT.
 // YJIT compiles on the thread running the iseq.

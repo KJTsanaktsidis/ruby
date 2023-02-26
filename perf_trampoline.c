@@ -184,28 +184,28 @@ bitmap_tree_take_slot(struct bitmap_tree *tree)
     long bit_path[tree->depth];
     /* Traverse down looking for a free slot */
     for (long i = 0; i < tree->depth; i++) {
-        struct bitmap_tree_level *level = &tree->levels[i];
-        long bitmap_index = level->offset + slot_at_this_level;
-        uint64_t bitmap = tree->elements[bitmap_index];
-        if (bitmap == UINT64_MAX) {
-            /* This means the bitmap tree is full */
-            return -1;
-        }
-        long bit = __builtin_ctzl(~bitmap);
-        slot_at_this_level = slot_at_this_level * 64 + bit;
-        bit_path[i] = slot_at_this_level;
+      struct bitmap_tree_level *level = &tree->levels[i];
+      long bitmap_index = level->offset + slot_at_this_level;
+      uint64_t bitmap = tree->elements[bitmap_index];
+      if (bitmap == UINT64_MAX) {
+        /* This means the bitmap tree is full */
+        return -1;
+      }
+      long bit = __builtin_ctzl(~bitmap);
+      slot_at_this_level = slot_at_this_level * 64 + bit;
+      bit_path[i] = slot_at_this_level;
     }
     /* Now traverse back up marking the selected bits as full if applicable */
     for (long i = tree->depth - 1; i >= 0; i--) {
-        struct bitmap_tree_level *level = &tree->levels[i];
-        long selected_bitmap = bit_path[i] / 64;
-        long selected_bit = bit_path[i] % 64;
-        uint64_t *bitmap = &tree->elements[level->offset + selected_bitmap];
-        *bitmap |= (1ul << selected_bit);
-        if (*bitmap != UINT64_MAX) {
-            /* If a bitmap is not full, don't continue traversing upwards and marking */
-            break;
-        }
+      struct bitmap_tree_level *level = &tree->levels[i];
+      long selected_bitmap = bit_path[i] / 64;
+      long selected_bit = bit_path[i] % 64;
+      uint64_t *bitmap = &tree->elements[level->offset + selected_bitmap];
+      *bitmap |= (1ul << selected_bit);
+      if (*bitmap != UINT64_MAX) {
+        /* If a bitmap is not full, don't continue traversing upwards and marking */
+        break;
+      }
     }
     return bit_path[tree->depth- 1];
 }
@@ -233,6 +233,9 @@ bitmap_tree_free_slot(struct bitmap_tree *tree, long slot)
 static long
 bitmap_tree_count_in_range(struct bitmap_tree *tree, long range_start, long range_end)
 {
+    if (range_end > tree->capacity) {
+        range_end = tree->capacity;
+    }
     long ret = 0;
     long ix_start = range_start / 64;
     long ix_end = div_ceil(range_end, 64);
@@ -258,10 +261,10 @@ bitmap_tree_count_in_range(struct bitmap_tree *tree, long range_start, long rang
 struct perf_trampoline_allocator {
     bool enabled;
     trampoline_bytes_t *trampoline_slots;
+    size_t page_size;
     long trampoline_slots_count;
     size_t trampoline_slots_len;
     struct bitmap_tree slot_tree;
-    uint64_t *page_setup_bitmap;
 };
 
 static void
@@ -299,6 +302,11 @@ init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
     /* Setup the bitmap tree we will use to work out where free slots are located */
     bitmap_tree_initialize(&al->slot_tree, al->trampoline_slots_count);
 
+    /* Put the address to jump to in the trampoline template */
+    uint64_t target_ptr = (uintptr_t)&rb_vm_jit_func_trampoline;
+    memcpy(&trampoline_bytes[TRAMPOLINE_TARGET_OFFSET], &target_ptr, sizeof(uint64_t));
+
+    al->page_size = sysconf(_SC_PAGESIZE);
     al->enabled = true;
     return;
 error:
@@ -314,6 +322,47 @@ rb_perf_trampoline_allocator_init(void)
     struct perf_trampoline_allocator *al = calloc(1, sizeof(struct perf_trampoline_allocator));
     init_allocator(al, 1024 * 1024 * 10);
     return al;
+}
+
+perf_trampoline_t
+rb_perf_trampoline_allocate(struct perf_trampoline_allocator *al)
+{
+    long slot = bitmap_tree_take_slot(&al->slot_tree);
+    if (slot == -1) {
+        return 0;
+    }
+    size_t first_slot_in_page = slot / al->page_size;
+    if (bitmap_tree_count_in_range(&al->slot_tree, first_slot_in_page, first_slot_in_page + al->page_size) == 1) {
+        /* one allocated slot in this page - i.e. _OUR_ slot. Need to initialize the page. */
+        for (size_t i = 0; i < (al->page_size / sizeof(trampoline_bytes_t)); i++) {
+            memcpy(&al->trampoline_slots[i + first_slot_in_page], trampoline_bytes, sizeof(trampoline_bytes_t));
+        }
+        int r = mprotect(&al->trampoline_slots[first_slot_in_page], al->page_size, PROT_READ | PROT_EXEC);
+        if (r == -1) {
+            fprintf(stderr, "error calling mprotect(2) on trampoline page: %s\n", strerrorname_np(errno));
+            exit(1);
+        }
+    }
+    return (perf_trampoline_t)&al->trampoline_slots[slot];
+}
+
+void
+rb_perf_trampoline_free(struct perf_trampoline_allocator *al, perf_trampoline_t trampoline)
+{
+    long slot = (((char*)trampoline) - ((char *)&al->trampoline_slots[0])) / sizeof(trampoline_bytes_t);
+    bitmap_tree_free_slot(&al->slot_tree, slot);
+    size_t first_slot_in_page = slot / al->page_size;
+    if (bitmap_tree_count_in_range(&al->slot_tree, first_slot_in_page, first_slot_in_page + al->page_size) == 0) {
+      /* Page is now unused, can free it. */
+      for (size_t i = 0; i < (al->page_size / sizeof(trampoline_bytes_t)); i++) {
+        memcpy(&al->trampoline_slots[i + first_slot_in_page], trampoline_bytes, sizeof(trampoline_bytes_t));
+      }
+      int r = madvise(&al->trampoline_slots[first_slot_in_page], al->page_size, MADV_FREE);
+      if (r == -1) {
+        fprintf(stderr, "error calling madvise(2) on trampoline page: %s\n", strerrorname_np(errno));
+        exit(1);
+      }
+    }
 }
 
 void
