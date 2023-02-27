@@ -303,6 +303,7 @@ usage(const char *name, int help, int highlight, int columns)
         M("--external-encoding=encoding",           ", --internal-encoding=encoding",
           "specify the default external or internal character encoding"),
         M("--backtrace-limit=num",                  "", "limit the maximum length of backtrace"),
+        M("--perf-trampolines",                     "", "make Ruby methods visibile to perf(1)"),
         M("--verbose",                              "", "turn on verbose mode and disable script from stdin"),
         M("--version",                              "", "print the version number, then exit"),
         M("--help",			            "", "show this message, -h for short message"),
@@ -1527,6 +1528,9 @@ proc_options(long argc, char **argv, ruby_cmdline_options_t *opt, int envopt)
                 long n = strtol(s, &e, 10);
                 if (errno == ERANGE || n < 0 || *e) rb_raise(rb_eRuntimeError, "wrong limit for backtrace length");
                 rb_backtrace_length_limit = n;
+            }
+            else if (is_option_with_arg("perf-trampolines", Qfalse, Qtrue)) {
+                opt->perf_trampolines = 1;
             }
             else {
                 rb_raise(rb_eRuntimeError,
