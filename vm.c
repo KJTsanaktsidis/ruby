@@ -416,10 +416,10 @@ jit_exec(rb_execution_context_t *ec)
     const rb_iseq_t *iseq = ec->cfp->iseq;
     struct rb_iseq_constant_body *body = ISEQ_BODY(iseq);
     bool yjit_enabled = rb_yjit_enabled_p();
-    if (yjit_enabled || mjit_call_p) {
+    bool perf_trampoline_enabled = rb_perf_trampoline_enabled_p();
+    if (yjit_enabled || mjit_call_p || perf_trampoline_enabled) {
         body->total_calls++;
-    }
-    else if (!(GET_VM()->perf_trampoline_allocator)) {
+    } else {
         return Qundef;
     }
 
@@ -449,20 +449,21 @@ jit_exec(rb_execution_context_t *ec)
             func = body->jit_func;
         }
     }
-
-    if (func == 0 && GET_VM()->perf_trampoline_allocator) {
-        /* No jit function, so insert a trampoline to make the C stack line up with
-           the VM stack */
-        func = rb_vm_jit_func_trampoline;
-    }
-
     if (func) {
         // Call the JIT code
         return func(ec, ec->cfp); // SystemV x64 calling convention: ec -> RDI, cfp -> RSI
-    } else {
-        /* return control to the interpreter */
-        return Qundef;
+    } else if (perf_trampoline_enabled) {
+        /* No jit function, so insert a trampoline to make the C stack line up with
+        the VM stack if --perf-trampoline is enabled */
+        if (!body->trampoline_func) {
+            body->trampoline_func = rb_perf_trampoline_allocate(rb_vm_iseq_trampoline);
+        }
+        if (body->trampoline_func) {
+            return body->trampoline_func(ec, ec->cfp);
+        }
     }
+    /* return control to the interpreter */
+    return Qundef;
 }
 #endif
 
@@ -479,7 +480,7 @@ jit_exec(rb_execution_context_t *ec)
 #ifndef MJIT_HEADER
 
 MJIT_FUNC_EXPORTED VALUE
-rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp) {
+rb_vm_iseq_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp) {
   if (!VM_FRAME_FINISHED_P(ec->cfp)) {
     VM_ENV_FLAGS_SET(ec->cfp->ep, VM_FRAME_FLAG_FINISH);
     return vm_exec(ec, false);
@@ -2945,9 +2946,6 @@ ruby_vm_destruct(rb_vm_t *vm)
             vm->frozen_strings = 0;
         }
         RB_ALTSTACK_FREE(vm->main_altstack);
-        if (vm->perf_trampoline_allocator) {
-            rb_perf_trampoline_allocator_destroy(vm->perf_trampoline_allocator);
-        }
         if (objspace) {
             rb_objspace_free(objspace);
         }
@@ -4065,7 +4063,6 @@ Init_BareVM(void)
     vm->negative_cme_table = rb_id_table_create(16);
     vm->overloaded_cme_table = st_init_numtable();
     vm->constant_cache = rb_id_table_create(0);
-    vm->perf_trampoline_allocator = rb_perf_trampoline_allocator_init();
 
     // setup main thread
     th->nt = ZALLOC(struct rb_native_thread);

@@ -519,6 +519,8 @@ struct rb_iseq_constant_body {
     // YJIT stores some data on each iseq.
     void *yjit_payload;
 #endif
+
+    VALUE (*trampoline_func)(struct rb_execution_context_struct *, struct rb_control_frame_struct *);
 };
 
 /* T_IMEMO/iseq */
@@ -746,8 +748,6 @@ typedef struct rb_vm_struct {
         size_t fiber_vm_stack_size;
         size_t fiber_machine_stack_size;
     } default_params;
-
-    struct perf_trampoline_allocator *perf_trampoline_allocator;
 } rb_vm_t;
 
 /* default values */
@@ -1808,7 +1808,7 @@ VALUE rb_catch_protect(VALUE t, rb_block_call_func *func, VALUE data, enum ruby_
 
 rb_execution_context_t *rb_vm_main_ractor_ec(rb_vm_t *vm); // ractor.c
 
-MJIT_FUNC_EXPORTED VALUE rb_vm_jit_func_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp);
+MJIT_FUNC_EXPORTED VALUE rb_vm_iseq_trampoline(rb_execution_context_t *ec, rb_control_frame_t *cfp);
 
 /* for thread */
 

@@ -56,6 +56,7 @@
 #include "internal/parse.h"
 #include "internal/process.h"
 #include "internal/variable.h"
+#include "perf_trampoline.h"
 #include "ruby/encoding.h"
 #include "ruby/thread.h"
 #include "ruby/util.h"
@@ -2003,6 +2004,9 @@ process_options(int argc, char **argv, ruby_cmdline_options_t *opt)
 #endif
 
     ruby_gc_set_params();
+    if (opt->perf_trampolines) {
+        rb_perf_trampoline_initialize();
+    }
     ruby_init_loadpath();
 
     Init_enc();

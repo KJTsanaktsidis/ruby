@@ -2,71 +2,69 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 
-#include "ccan/list/list.h"
 #include "perf_trampoline.h"
 #include "ruby.h"
-#include "ruby/internal/value.h"
 #include "vm_core.h"
-#include "vm_callinfo.h"
 
-#if __x86_64__
-
-#define TRAMPOLINE_TARGET_OFFSET 19
-#define TRAMPOLINES_PER_PAGE 127
-#define TRAMPOLINE_PAGE_SIZE 4096
-typedef struct { char b[32]; } trampoline_bytes_t;
-char trampoline_bytes[32] = {
-  /* push %rbp */
-  0x55,
-  /* mov %rsp,%rbp */
-  0x48, 0x89, 0xe5,
-  /* mov %rcx, 0x7(%rip) <trampoline_end> */
-  0x48, 0x89, 0x0d, 0x07, 0x00, 0x00, 0x00,
-  /* call *%rcx */
-  0xff, 0xd1,
-  /* mov %rbp,%rsp */
-  0x48, 0x89, 0xec,
-  /* pop %rbp */
-  0x5d,
-  /* ret */
-  0xc3,
-  /* The 8-byte address of the function to jump to */
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  /* 6 bytes of padding to align the function on a qword boundary */
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
-
-#elif __aarch64__
-
-#define TRAMPOLINE_TARGET_OFFSET 24
-#define TRAMPOLINES_PER_PAGE 127
-#define TRAMPOLINE_PAGE_SIZE 4096
-typedef struct { char b[32]; } trampoline_bytes_t;
-char trampoline_bytes[32] = {
-    /* stp	x29, x30, [sp, #-16] */
-    0xa9, 0x3f, 0x7b, 0xfd,
-    /* mov	x29, sp */
-    0x91, 0x00, 0x03, 0xfd,
-    /* ldr	x3, 18 <trampoline_end> */
-    0x58, 0x00, 0x00, 0x83,
-    /* blr x3 */
-    0xd6, 0x3f, 0x00, 0x60,
-    /* ldp	x29, x30, [sp], #16 */
-    0xa8, 0xc1, 0x7b, 0xfd,
-    /* ret */
-    0xd6, 0x5f, 0x03, 0xc0,
-    /* The 8-byte address of the function to jump to. */
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00
-};
-
+#if defined(HAVE_MMAP) && defined(HAVE_SYSCONF) && defined(HAVE_FTRUNCATE) && defined(HAVE_FALLOCATE)
+#   define PERF_TRAMPOLINE_SUPPORTED_SYSTEM
 #endif
+
+#if defined(__x86_64__)
+#   define PERF_TRAMPOLINE_SUPPORTED_ARCH
+#   define TRAMPOLINE_TARGET_OFFSET 19
+    typedef struct { char b[32]; } trampoline_bytes_t;
+    char trampoline_bytes[32] = {
+        /* push %rbp */
+        0x55,
+        /* mov %rsp,%rbp */
+        0x48, 0x89, 0xe5,
+        /* mov %rcx, 0x7(%rip) <trampoline_end> */
+        0x48, 0x89, 0x0d, 0x07, 0x00, 0x00, 0x00,
+        /* call *%rcx */
+        0xff, 0xd1,
+        /* mov %rbp,%rsp */
+        0x48, 0x89, 0xec,
+        /* pop %rbp */
+        0x5d,
+        /* ret */
+        0xc3,
+        /* The 8-byte address of the function to jump to */
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        /* 6 bytes of padding to align the function on a qword boundary */
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+#elif defined(__aarch64__)
+#   define PERF_TRAMPOLINE_SUPPORTED_ARCH
+#   define TRAMPOLINE_TARGET_OFFSET 24
+    typedef struct { char b[32]; } trampoline_bytes_t;
+    char trampoline_bytes[32] = {
+        /* stp	x29, x30, [sp, #-16]! */
+        0xfd, 0x7b, 0xbf, 0xa9,
+        /* mov	x29, sp */
+        0xfd, 0x03, 0x00, 0x91,
+        /* ldr	x3, 18 <trampoline_end> */
+        0x83, 0x00, 0x00, 0x58,
+        /* blr x3 */
+        0x60, 0x00, 0x3f, 0xd6,
+        /* ldp	x29, x30, [sp], #16 */
+        0xfd, 0x7b, 0xc1, 0xa8,
+        /* ret */
+        0xc0, 0x03, 0x5f, 0xd6,
+        /* The 8-byte address of the function to jump to. */
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+#endif
+
+#if defined(PERF_TRAMPOLINE_SUPPORTED_SYSTEM) && defined(PERF_TRAMPOLINE_SUPPORTED_ARCH)
 
 
 /* The "bitmap tree" is the data structure used by the perf_trampoline_allocator to keep track
@@ -259,121 +257,229 @@ bitmap_tree_count_in_range(struct bitmap_tree *tree, long range_start, long rang
 /* The trampoline allocator itself */
 
 struct perf_trampoline_allocator {
-    bool enabled;
-    trampoline_bytes_t *trampoline_slots;
-    size_t page_size;
+    bool initialized;
+    bool have_warned_about_exhaustion;
+    bool disable_w_x;
+    int backing_fd;
+    trampoline_bytes_t *trampoline_slots_w;
+    trampoline_bytes_t *trampoline_slots_x;
+    int page_size;
     long trampoline_slots_count;
     size_t trampoline_slots_len;
     struct bitmap_tree slot_tree;
 };
 
+struct perf_trampoline_allocator proc_allocator = { 0 };
+
 static void
 destroy_allocator(struct perf_trampoline_allocator *al)
 {
     bitmap_tree_destroy(&al->slot_tree);
-    if (al->trampoline_slots != MAP_FAILED) {
-        munmap(al->trampoline_slots, al->trampoline_slots_len);
+    if (al->trampoline_slots_w != MAP_FAILED) {
+        munmap(al->trampoline_slots_w, al->trampoline_slots_len);
+    }
+    if (al->trampoline_slots_x != MAP_FAILED) {
+        munmap(al->trampoline_slots_x, al->trampoline_slots_len);
+    }
+    if (al->backing_fd != -1) {
+        close(al->backing_fd);
+    }
+}
+
+static void
+open_mem_file(const char *name_stem, int *fd)
+{
+#ifdef HAVE_MEMFD_CREATE
+    *fd = memfd_create(name_stem, MFD_CLOEXEC);
+    if (*fd != -1) {
+        return;
+    } else if (errno != ENOSYS) {
+        rb_sys_fail("memfd_create(2)");
+    }
+    /* if ENOSYS, try one of the methods below. */
+#endif
+
+    /* append .XXXXXX to the name_stem to make it a valid mkstemp template */
+    size_t tempfile_name_len = strlen(name_stem) + 8;
+    char *tempfile_name = alloca(tempfile_name_len);
+    snprintf(tempfile_name, tempfile_name_len, "%s.XXXXXX", name_stem);
+    bool need_to_cloexec;
+#if defined(HAVE_MKOSTEMP)
+    *fd = mkostemp(tempfile_name, O_CLOEXEC);
+    need_to_cloexec = false;
+#elif defined(HAVE_MKSTEMP)
+    *fd = mkstemp(tempfile_name);
+    need_to_cloexec = true;
+#else
+    rb_raise(rb_eStandardError, "no memfd_create(2) or mkstemp(3) on this system")
+#endif
+
+    if (*fd == -1) {
+        rb_sys_fail("mkstemp(3)");
+    }
+    if (need_to_cloexec) {
+        int flags = fcntl(*fd, F_GETFD);
+        if (flags == -1) {
+            rb_sys_fail("fcntl(2) F_GETFD");
+        }
+        int r = fcntl(*fd, F_SETFD, flags | FD_CLOEXEC);
+        if (r == -1) {
+            rb_sys_fail("fcntl(2) F_SETFD");
+        }
+    }
+    int r = unlink(tempfile_name);
+    if (r == -1) {
+        rb_sys_fail("unlink(2)");
     }
 }
 
 
-static void
-init_allocator(struct perf_trampoline_allocator *al, long max_trampolines)
+static VALUE
+init_allocator_i(VALUE vargs)
 {
-    char errmsg[256];
+    int r;
+    struct perf_trampoline_allocator *al = (struct perf_trampoline_allocator *)vargs;
 
-    al->trampoline_slots = MAP_FAILED;
+    al->initialized = false;
+    al->backing_fd = -1;
+    al->trampoline_slots_w = MAP_FAILED;
+    al->trampoline_slots_x = MAP_FAILED;    
     al->trampoline_slots_len = 0;
-    al->enabled = false;
+    al->page_size = -1;
     memset(&al->slot_tree, 0, sizeof(al->slot_tree));
 
-    /* Create the memory region that will hold the perf trampolines themselves */
-    al->trampoline_slots_count = max_trampolines;
-    al->trampoline_slots_len = max_trampolines * sizeof(trampoline_bytes_t);
-    al->trampoline_slots = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_WRITE,
-                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (al->trampoline_slots == MAP_FAILED) {
-        snprintf(errmsg, sizeof(errmsg),
-                 "failed mmap(2) for perf trampoline allocator mapping: %s",
-                 strerrorname_np(errno));
-        goto error;
+    /* Create the file descriptor which will back the perf trampoline mappings */
+    open_mem_file("perf_trampoline", &al->backing_fd);
+
+    /* size the backing fd */
+    al->trampoline_slots_len = al->trampoline_slots_count * sizeof(trampoline_bytes_t);
+    r = ftruncate(al->backing_fd, al->trampoline_slots_len);
+    if (r == -1) {
+        rb_sys_fail("ftruncate(2)");
+    }
+
+    /* Create the memory mappings themselves */
+    if (al->disable_w_x) {
+        al->trampoline_slots_w = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                      MAP_PRIVATE, al->backing_fd, 0);
+        if (al->trampoline_slots_w == MAP_FAILED) {
+            rb_sys_fail("mmap(2) (WX mapping)");
+        }
+        al->trampoline_slots_x = al->trampoline_slots_w;
+    } else {
+        al->trampoline_slots_w = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_WRITE,
+                                      MAP_SHARED, al->backing_fd, 0);
+        if (al->trampoline_slots_w == MAP_FAILED) {
+            rb_sys_fail("mmap(2) (writable mapping)");
+        }
+        al->trampoline_slots_x = mmap(NULL, al->trampoline_slots_len, PROT_READ | PROT_EXEC,
+                                      MAP_SHARED, al->backing_fd, 0);
+        if (al->trampoline_slots_x == MAP_FAILED) {
+            rb_sys_fail("mmap(2) (executable mapping)");
+        }
     }
 
     /* Setup the bitmap tree we will use to work out where free slots are located */
     bitmap_tree_initialize(&al->slot_tree, al->trampoline_slots_count);
 
-    /* Put the address to jump to in the trampoline template */
-    uint64_t target_ptr = (uintptr_t)&rb_vm_jit_func_trampoline;
-    memcpy(&trampoline_bytes[TRAMPOLINE_TARGET_OFFSET], &target_ptr, sizeof(uint64_t));
-
     al->page_size = sysconf(_SC_PAGESIZE);
-    al->enabled = true;
-    return;
-error:
-    destroy_allocator(al);
-    fprintf(stderr, "%s\n", errmsg);
-    exit(1);
+    if (al->page_size == -1) {
+        rb_raise(rb_eStandardError, "could not get page size from sysconf(3)");
+    }
+
+    al->initialized = true;
+    return Qnil;
 }
 
-
-struct perf_trampoline_allocator *
-rb_perf_trampoline_allocator_init(void)
-{
-    struct perf_trampoline_allocator *al = calloc(1, sizeof(struct perf_trampoline_allocator));
-    init_allocator(al, 1024 * 1024 * 10);
-    return al;
-}
-
-perf_trampoline_t
-rb_perf_trampoline_allocate(struct perf_trampoline_allocator *al)
+static perf_trampoline_t
+perf_trampoline_allocate_i(struct perf_trampoline_allocator *al, void *trampoline_target)
 {
     long slot = bitmap_tree_take_slot(&al->slot_tree);
     if (slot == -1) {
         return 0;
     }
-    size_t first_slot_in_page = slot / al->page_size;
-    if (bitmap_tree_count_in_range(&al->slot_tree, first_slot_in_page, first_slot_in_page + al->page_size) == 1) {
-        /* one allocated slot in this page - i.e. _OUR_ slot. Need to initialize the page. */
-        for (size_t i = 0; i < (al->page_size / sizeof(trampoline_bytes_t)); i++) {
-            memcpy(&al->trampoline_slots[i + first_slot_in_page], trampoline_bytes, sizeof(trampoline_bytes_t));
-        }
-        int r = mprotect(&al->trampoline_slots[first_slot_in_page], al->page_size, PROT_READ | PROT_EXEC);
-        if (r == -1) {
-            fprintf(stderr, "error calling mprotect(2) on trampoline page: %s\n", strerrorname_np(errno));
-            exit(1);
-        }
-    }
-    return (perf_trampoline_t)&al->trampoline_slots[slot];
+    trampoline_bytes_t *trampoline = &al->trampoline_slots_w[slot];
+    memcpy(trampoline->b, trampoline_bytes, sizeof(trampoline_bytes_t));
+    memcpy(trampoline->b + TRAMPOLINE_TARGET_OFFSET, &trampoline_target, sizeof(void *));
+    __sync_synchronize();
+    return (perf_trampoline_t)&al->trampoline_slots_x[slot];
 }
 
 void
-rb_perf_trampoline_free(struct perf_trampoline_allocator *al, perf_trampoline_t trampoline)
+perf_trampoline_free_i(struct perf_trampoline_allocator *al, perf_trampoline_t trampoline)
 {
-    long slot = (((char*)trampoline) - ((char *)&al->trampoline_slots[0])) / sizeof(trampoline_bytes_t);
+    long slot = (((char*)trampoline) - ((char *)&al->trampoline_slots_x[0])) / sizeof(trampoline_bytes_t);
     bitmap_tree_free_slot(&al->slot_tree, slot);
     size_t first_slot_in_page = slot / al->page_size;
     if (bitmap_tree_count_in_range(&al->slot_tree, first_slot_in_page, first_slot_in_page + al->page_size) == 0) {
-      /* Page is now unused, can free it. */
-      for (size_t i = 0; i < (al->page_size / sizeof(trampoline_bytes_t)); i++) {
-        memcpy(&al->trampoline_slots[i + first_slot_in_page], trampoline_bytes, sizeof(trampoline_bytes_t));
-      }
-      int r = madvise(&al->trampoline_slots[first_slot_in_page], al->page_size, MADV_FREE);
-      if (r == -1) {
-        fprintf(stderr, "error calling madvise(2) on trampoline page: %s\n", strerrorname_np(errno));
-        exit(1);
-      }
+        /* Page is now unused, can free it. */
+        int r = fallocate(al->backing_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                          first_slot_in_page * sizeof(trampoline_bytes_t),
+                          first_slot_in_page * sizeof(trampoline_bytes_t) + al->page_size);
+        if (r == -1) {
+            rb_warning("failed to free page trampoline page with fallocate: errno %d\n", errno);
+        }
     }
+    __sync_synchronize();
+}
+
+
+void
+rb_perf_trampoline_initialize(void)
+{
+    int state;
+    proc_allocator.trampoline_slots_count = 1024 * 1024 * 10;
+    proc_allocator.disable_w_x = true;
+    rb_protect(init_allocator_i, (VALUE)&proc_allocator, &state);
+    if (state) {
+        VALUE err = rb_errinfo();
+        rb_warn("failed to configure perf trampolines: %"PRIsVALUE"; they will not be used.", err);
+        destroy_allocator(&proc_allocator);
+        proc_allocator = (struct perf_trampoline_allocator){ 0 };
+        rb_set_errinfo(Qnil);
+    }
+}
+
+perf_trampoline_t
+rb_perf_trampoline_allocate(void *trampoline_target)
+{
+    if (!proc_allocator.initialized) {
+        return 0;
+    }
+    perf_trampoline_t tramp = perf_trampoline_allocate_i(&proc_allocator, trampoline_target);
+    if (!tramp) {
+        if (!proc_allocator.have_warned_about_exhaustion) {
+            rb_warning("ran out of perf_trampoline slots! perf-based profiling might miss frames.");
+            proc_allocator.have_warned_about_exhaustion = true;
+        }
+    }
+    return tramp;
 }
 
 void
-rb_perf_trampoline_allocator_destroy(struct perf_trampoline_allocator *al)
+rb_perf_trampoline_free(perf_trampoline_t trampoline)
 {
-    if (al) {
-        destroy_allocator(al);
-        free(al);
+    if (!proc_allocator.initialized) {
+        return;
     }
+    perf_trampoline_free_i(&proc_allocator, trampoline);
 }
 
+
+bool
+rb_perf_trampoline_enabled_p(void)
+{
+    return proc_allocator.initialized;
+}
+
+void
+rb_perf_trampoline_deinitialize(void)
+{
+    if (proc_allocator.initialized) {
+        destroy_allocator(&proc_allocator);
+        proc_allocator = (struct perf_trampoline_allocator){ 0 };
+    }
+}
 
 /**** DEBUGGING HACKS ****/
 
@@ -449,3 +555,35 @@ Init_perf_trampoline_debug(void)
     rb_define_method(cBitmapTree, "free_slot", bitmap_tree_rb_free_slot, 1);
     rb_define_method(cBitmapTree, "count_in_range", bitmap_tree_rb_count_in_range, 2);
 }
+
+#else
+
+void
+rb_perf_trampoline_initialize(void)
+{
+    rb_warn("perf trampolines are not available on this system; they will not be used.");
+}
+
+perf_trampoline_t
+rb_perf_trampoline_allocate(void *trampoline_target)
+{
+    return 0;
+}
+
+void
+rb_perf_trampoline_free(perf_trampoline_t *trampoline)
+{
+}
+
+bool
+rb_perf_trampoline_enabled_p(void)
+{
+    return false;
+}
+
+void
+rb_perf_trampoline_deinitialize(void)
+{
+}
+
+#endif
