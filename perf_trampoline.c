@@ -382,6 +382,9 @@ init_allocator_i(VALUE vargs)
     /* Setup the bitmap tree we will use to work out where free slots are located */
     bitmap_tree_initialize(&al->slot_tree, al->trampoline_slots_count);
 
+    void *target = rb_vm_iseq_trampoline;
+    memcpy(trampoline_bytes + TRAMPOLINE_TARGET_OFFSET, &target, sizeof(void *));
+
     al->page_size = sysconf(_SC_PAGESIZE);
     if (al->page_size == -1) {
         rb_raise(rb_eStandardError, "could not get page size from sysconf(3)");
@@ -398,12 +401,23 @@ perf_trampoline_allocate_i(struct perf_trampoline_allocator *al, void *trampolin
     if (slot == -1) {
         return 0;
     }
-    trampoline_bytes_t *trampoline = &al->trampoline_slots_w[slot];
-    memcpy(trampoline->b, trampoline_bytes, sizeof(trampoline_bytes_t));
-    memcpy(trampoline->b + TRAMPOLINE_TARGET_OFFSET, &trampoline_target, sizeof(void *));
-    __sync_synchronize();
+    size_t slots_per_page = al->page_size / sizeof(trampoline_bytes_t);
+    size_t first_slot_in_page = (slot / slots_per_page) * slots_per_page;
+    size_t first_slot_in_next_page = first_slot_in_page + slots_per_page;
+    if (bitmap_tree_count_in_range(&al->slot_tree, first_slot_in_page, first_slot_in_next_page) == 1) {
+        for (size_t i = first_slot_in_page; i < first_slot_in_next_page; i++) {
+            trampoline_bytes_t *trampoline = &al->trampoline_slots_w[i];
+            memcpy(trampoline->b, trampoline_bytes, sizeof(trampoline_bytes_t));
+        }
+        __sync_synchronize();
+        __clear_cache(&al->trampoline_slots_x[first_slot_in_page], &al->trampoline_slots_x[first_slot_in_next_page]);
+    }
+    // trampoline_bytes_t *trampoline = &al->trampoline_slots_w[slot];
+    // memcpy(trampoline->b, trampoline_bytes, sizeof(trampoline_bytes_t));
+    // memcpy(trampoline->b + TRAMPOLINE_TARGET_OFFSET, &trampoline_target, sizeof(void *));
+    // __sync_synchronize();
     perf_trampoline_t executable_trampoline = (perf_trampoline_t)&al->trampoline_slots_x[slot];
-    __clear_cache((char *)executable_trampoline, ((char *)executable_trampoline) + sizeof(perf_trampoline_t));
+    // __clear_cache((char *)executable_trampoline, ((char *)executable_trampoline) + sizeof(perf_trampoline_t));
     return executable_trampoline;
 }
 
