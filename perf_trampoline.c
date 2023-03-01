@@ -402,7 +402,9 @@ perf_trampoline_allocate_i(struct perf_trampoline_allocator *al, void *trampolin
     memcpy(trampoline->b, trampoline_bytes, sizeof(trampoline_bytes_t));
     memcpy(trampoline->b + TRAMPOLINE_TARGET_OFFSET, &trampoline_target, sizeof(void *));
     __sync_synchronize();
-    return (perf_trampoline_t)&al->trampoline_slots_x[slot];
+    perf_trampoline_t executable_trampoline = (perf_trampoline_t)&al->trampoline_slots_x[slot];
+    __clear_cache((char *)executable_trampoline, ((char *)executable_trampoline) + sizeof(perf_trampoline_t));
+    return executable_trampoline;
 }
 
 void
