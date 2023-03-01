@@ -1530,7 +1530,7 @@ proc_options(long argc, char **argv, ruby_cmdline_options_t *opt, int envopt)
                 if (errno == ERANGE || n < 0 || *e) rb_raise(rb_eRuntimeError, "wrong limit for backtrace length");
                 rb_backtrace_length_limit = n;
             }
-            else if (is_option_with_arg("perf-trampolines", Qfalse, Qtrue)) {
+            else if (strcmp("perf-trampolines", s) == 0) {
                 opt->perf_trampolines = 1;
             }
             else {
