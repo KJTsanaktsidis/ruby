@@ -455,12 +455,14 @@ jit_exec(rb_execution_context_t *ec)
     } else if (perf_trampoline_enabled) {
         /* No jit function, so insert a trampoline to make the C stack line up with
         the VM stack if --perf-trampoline is enabled */
-        if (!body->trampoline_func) {
-            body->trampoline_func = rb_perf_trampoline_allocate(rb_vm_iseq_trampoline);
-        }
-        if (body->trampoline_func) {
-            return body->trampoline_func(ec, ec->cfp);
-        }
+        // if (!body->trampoline_func) {
+        //     body->trampoline_func = rb_perf_trampoline_allocate(rb_vm_iseq_trampoline);
+        // }
+        // if (body->trampoline_func) {
+        //     return body->trampoline_func(ec, ec->cfp);
+        // }
+        // return rb_vm_iseq_trampoline(ec, ec->cfp);
+        return rb_perf_trampoline_asm(ec, ec->cfp);
     }
     /* return control to the interpreter */
     return Qundef;

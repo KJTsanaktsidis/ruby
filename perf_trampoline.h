@@ -12,4 +12,6 @@ perf_trampoline_t rb_perf_trampoline_allocate(void *trampoline_target);
 void rb_perf_trampoline_free(perf_trampoline_t trampoline);
 void Init_perf_trampoline_debug(void);
 
+VALUE rb_perf_trampoline_asm(rb_execution_context_t *, rb_control_frame_t *);
+
 #endif
