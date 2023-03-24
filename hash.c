@@ -38,6 +38,8 @@
 #include "gc.h"
 #endif
 
+#include "vm_core.h"
+
 #define HAS_EXTRA_STATES(hash, klass) ( \
     ((klass = has_extra_methods(rb_obj_class(hash))) != 0) || \
     FL_TEST((hash), FL_EXIVAR|RHASH_PROC_DEFAULT) || \
@@ -1630,6 +1632,43 @@ NORETURN(static void no_new_key(void));
 static void
 no_new_key(void)
 {
+    rb_thread_t *th = 0;
+    VALUE thread_bt_ary = Qnil;
+    VALUE thread_bt_str = Qnil;
+    VALUE thread_msg = Qnil;
+    VALUE all_backtraces = rb_ary_new();
+    VALUE full_msg_lines = rb_ary_new();
+    VALUE empty_ary = rb_ary_new();
+
+    char *enabled_val = getenv("WARN_ON_HASH_INSERTION_DURING_ITERATION");
+    if (enabled_val && strcmp(enabled_val, "1") == 0) {
+        list_for_each(&GET_VM()->living_threads, th, vmlt_node) {
+            switch (th->status) {
+            case THREAD_RUNNABLE:
+            case THREAD_STOPPED:
+            case THREAD_STOPPED_FOREVER:
+                thread_bt_ary = rb_vm_thread_backtrace(0, &empty_ary, th->self);
+                thread_bt_ary = rb_ary_reverse(thread_bt_ary);
+                thread_bt_str = rb_ary_join(thread_bt_ary, rb_str_new2("\n"));
+                if (th == GET_THREAD()) {
+                    thread_msg = rb_sprintf("---- Current (raising) thread %"PRIsVALUE" id 0x%lx (most recent call last) ---", th->name, th->self);
+                    rb_ary_unshift(full_msg_lines, thread_bt_str);
+                    rb_ary_unshift(full_msg_lines, thread_msg);
+                } else {
+                    thread_msg = rb_sprintf("---- Thread %"PRIsVALUE" id 0x%lx (most recent call last) ---", th->name, th->self);
+                    rb_ary_push(full_msg_lines, thread_msg);
+                    rb_ary_push(full_msg_lines, thread_bt_str);
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        VALUE full_msg = rb_ary_join(full_msg_lines, rb_str_new2("\n"));
+        rb_warn("Key added into hash during iteration; from:\n%"PRIsVALUE, full_msg);
+    }
+
     rb_raise(rb_eRuntimeError, "can't add a new key into hash during iteration");
 }
 
