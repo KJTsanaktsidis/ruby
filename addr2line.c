@@ -246,8 +246,8 @@ get_nth_dirname(unsigned long dir, const char *p)
 	while (*p) p++;
 	p++;
 	if (!*p) {
-	    kprintf("Unexpected directory number %lu in %s\n",
-		    dir, binary_filename);
+	    /* kprintf("Unexpected directory number %lu in %s\n",
+		    dir, binary_filename); */
 	    return "";
 	}
     }
@@ -276,8 +276,8 @@ fill_filename(int file, uint8_t format, uint16_t version, const char *include_di
             filename = p;
             if (!*p) {
                 /* Need to output binary file name? */
-                kprintf("Unexpected file number %d in %s at %tx\n",
-                        file, binary_filename, filenames - obj->mapped);
+                /* kprintf("Unexpected file number %d in %s at %tx\n",
+                        file, binary_filename, filenames - obj->mapped); */
                 return;
             }
             while (*p) p++;

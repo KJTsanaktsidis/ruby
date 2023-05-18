@@ -262,8 +262,9 @@ timeout_prepare(rb_hrtime_t **to, rb_hrtime_t *rel, rb_hrtime_t *end,
 MAYBE_UNUSED(NOINLINE(static int thread_start_func_2(rb_thread_t *th, VALUE *stack_start)));
 
 static void
-ubf_sigwait(void *ignore)
+ubf_sigwait(void *ignored)
 {
+    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread from ubf_sigwait from 0x%lx", (uintptr_t)GET_THREAD()->nt->thread_id);
     rb_thread_wakeup_timer_thread(0);
 }
 
@@ -4471,6 +4472,7 @@ consume_communication_pipe(int fd)
 
     while (1) {
         result = read(fd, buff, sizeof(buff));
+	KJ_TRACEBUF_EVENT("pipe read r %ld err %d from 0x%lx", result, errno, (uintptr_t)GET_THREAD()->nt->thread_id);
         if (result > 0) {
             ret = TRUE;
             if (USE_EVENTFD || result < (ssize_t)sizeof(buff)) {
@@ -4511,7 +4513,8 @@ check_signals_nogvl(rb_thread_t *th, int sigwait_fd)
         else {
             threadptr_trap_interrupt(vm->ractor.main_thread);
         }
-        ret = TRUE; /* for rb_sigwait_sleep */
+        KJ_TRACEBUF_EVENT("ret=TRUE override from 0x%lx", (uintptr_t)GET_THREAD()->nt->thread_id);
+        /* ret = TRUE; */ /* for rb_sigwait_sleep */
     }
     return ret;
 }

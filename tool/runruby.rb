@@ -145,6 +145,14 @@ if debugger
       File.exist?(gdb = File.join(abs_archdir, 'run.gdb'))
       debugger.push('-x', gdb)
     end
+    debugger << "-ex"
+    debugger << "set confirm on"
+    debugger << "-ex"
+    debugger << "break pthread_kill"
+    debugger << "-ex"
+    debugger << "run"
+    debugger << "-ex"
+    debugger << "quit"
     debugger << '--args'
   when :lldb
     debugger = ['lldb', '-O', "command script import #{srcdir}/misc/lldb_cruby.py"]

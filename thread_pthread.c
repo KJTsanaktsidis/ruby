@@ -506,7 +506,8 @@ thread_sched_to_running_common(struct rb_thread_sched *sched, rb_thread_t *th)
     RB_INTERNAL_THREAD_HOOK(RUBY_INTERNAL_THREAD_EVENT_RESUMED);
 
     if (!sched->timer) {
-        if (!designate_timer_thread(sched) && !ubf_threads_empty()) {
+        if (!designate_timer_thread(sched) && !ubf_threads_empty() && th != sigwait_th) {
+	    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread from thread_sched_to_running_common of 0x%x in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
             rb_thread_wakeup_timer_thread(-1);
         }
     }
@@ -1412,6 +1413,7 @@ static void
 ubf_wakeup_thread(rb_thread_t *th)
 {
     RUBY_DEBUG_LOG("th:%u", rb_th_serial(th));
+    KJ_TRACEBUF_EVENT("ubf_wakeup_thread of 0x%lx from 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
     pthread_kill(th->nt->thread_id, SIGVTALRM);
 }
 
@@ -1419,6 +1421,7 @@ static void
 ubf_select(void *ptr)
 {
     rb_thread_t *th = (rb_thread_t *)ptr;
+    KJ_TRACEBUF_EVENT("ubf_select of 0x%lx from 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
     struct rb_thread_sched *sched = TH_SCHED(th);
     const rb_thread_t *cur = ruby_thread_from_native(); /* may be 0 */
 
@@ -1442,6 +1445,7 @@ ubf_select(void *ptr)
          */
         if (rb_native_mutex_trylock(&sched->lock) == 0) {
             if (!sched->timer) {
+	        KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread from ubf_select of 0x%x in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
                 rb_thread_wakeup_timer_thread(-1);
             }
             rb_native_mutex_unlock(&sched->lock);
@@ -1509,6 +1513,7 @@ rb_thread_wakeup_timer_thread_fd(int fd)
     /* already opened */
     if (fd >= 0) {
       retry:
+	KJ_TRACEBUF_EVENT("pipe write from 0x%lx", (uintptr_t)GET_THREAD()->nt->thread_id);
         if ((result = write(fd, &buff, sizeof(buff))) <= 0) {
             int e = errno;
             switch (e) {
@@ -1572,8 +1577,10 @@ ubf_timer_arm(rb_serial_t fork_gen) /* async signal safe */
     }
 #elif UBF_TIMER == UBF_TIMER_PTHREAD
     if (!fork_gen || fork_gen == timer_pthread.fork_gen) {
-        if (ATOMIC_EXCHANGE(timer_pthread.armed, 1) == 0)
+        if (ATOMIC_EXCHANGE(timer_pthread.armed, 1) == 0) {
+	    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread_fd from ubf_timer_arm in 0x%lx\n", (uintptr_t)GET_THREAD()->nt->thread_id);
             rb_thread_wakeup_timer_thread_fd(timer_pthread.low[1]);
+	}
     }
 #endif
 }
@@ -1583,6 +1590,7 @@ rb_thread_wakeup_timer_thread(int sig)
 {
     /* non-sighandler path */
     if (sig <= 0) {
+	KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread_fd from rb_thread_wakeup_timer_thread (non-sig) in 0x%lx", (uintptr_t)GET_THREAD()->nt->thread_id);
         rb_thread_wakeup_timer_thread_fd(signal_self_pipe.normal[1]);
         if (sig < 0) {
             ubf_timer_arm(0);
@@ -1592,6 +1600,7 @@ rb_thread_wakeup_timer_thread(int sig)
 
     /* must be safe inside sighandler, so no mutex */
     if (signal_self_pipe.fork_gen == current_fork_gen) {
+	KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread_fd from rb_thread_wakeup_timer_thread (sig) in 0x%lx", (uintptr_t)GET_THREAD()->nt->thread_id);
         rb_thread_wakeup_timer_thread_fd(signal_self_pipe.normal[1]);
 
         /*
@@ -1982,6 +1991,7 @@ done:
 
     timer_pthread.fork_gen = 0;
     ubf_timer_disarm();
+    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread_fd from ubf_timer_destroy in 0x%lx\n", (uintptr_t)GET_THREAD()->nt->thread_id);
     rb_thread_wakeup_timer_thread_fd(timer_pthread.low[1]);
     err = pthread_join(timer_pthread.thid, 0);
     if (err) {
@@ -2149,7 +2159,11 @@ rb_sigwait_sleep(rb_thread_t *th, int sigwait_fd, const rb_hrtime_t *rel)
     pfd.events = POLLIN;
 
     if (!BUSY_WAIT_SIGNALS && ubf_threads_empty()) {
+        KJ_TRACEBUF_EVENT("ppoll (top) for %ld ns on 0x%lx", *rel, (uintptr_t)GET_THREAD()->nt->thread_id);
+	rb_hrtime_t t1 = rb_hrtime_now();
         (void)ppoll(&pfd, 1, rb_hrtime2timespec(&ts, rel), 0);
+	rb_hrtime_t t2 = rb_hrtime_now();
+        KJ_TRACEBUF_EVENT("ppoll (top) lasted %ld ns on 0x%lx", t2 - t1, (uintptr_t)GET_THREAD()->nt->thread_id);
         check_signals_nogvl(th, sigwait_fd);
     }
     else {
@@ -2169,10 +2183,16 @@ rb_sigwait_sleep(rb_thread_t *th, int sigwait_fd, const rb_hrtime_t *rel)
          * [ruby-core:88102]
          */
         for (;;) {
+
             const rb_hrtime_t *sto = sigwait_timeout(th, sigwait_fd, &to, &n);
 
+		KJ_TRACEBUF_EVENT("ppoll (bottom) n=%d on 0x%lx", n,  (uintptr_t)GET_THREAD()->nt->thread_id);
             if (n) return;
+		KJ_TRACEBUF_EVENT("ppoll (bottom) for %ld ns on 0x%lx", *sto, (uintptr_t)GET_THREAD()->nt->thread_id);
+		rb_hrtime_t t1 = rb_hrtime_now();
             n = ppoll(&pfd, 1, rb_hrtime2timespec(&ts, sto), 0);
+		rb_hrtime_t t2 = rb_hrtime_now();
+		KJ_TRACEBUF_EVENT("ppoll (bottom) lasted %ld ns ret %ld err %d on 0x%lx", t2 - t1, n, errno, (uintptr_t)GET_THREAD()->nt->thread_id);
             if (check_signals_nogvl(th, sigwait_fd))
                 return;
             if (n || (th && RUBY_VM_INTERRUPTED(th->ec)))
@@ -2191,6 +2211,7 @@ rb_sigwait_sleep(rb_thread_t *th, int sigwait_fd, const rb_hrtime_t *rel)
 static void
 ubf_ppoll_sleep(void *ignore)
 {
+    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread_fd from ubf_ppoll_sleep in 0x%lx\n", (uintptr_t)GET_THREAD()->nt->thread_id);
     rb_thread_wakeup_timer_thread_fd(signal_self_pipe.ub_main[1]);
 }
 
@@ -2270,17 +2291,21 @@ native_sleep(rb_thread_t *th, rb_hrtime_t *rel)
         th->unblock.func = ubf_sigwait;
         rb_native_mutex_unlock(&th->interrupt_lock);
 
+	KJ_TRACEBUF_EVENT("THREAD_BLOCKING_YIELD (native_sleep) in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
         THREAD_BLOCKING_YIELD(th);
         {
             if (!RUBY_VM_INTERRUPTED(th->ec)) {
+	        KJ_TRACEBUF_EVENT("doing sigwait in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
                 rb_sigwait_sleep(th, sigwait_fd, rel);
             }
             else {
+	        KJ_TRACEBUF_EVENT("NOT doing sigwait in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
                 check_signals_nogvl(th, sigwait_fd);
             }
             unblock_function_clear(th);
         }
         THREAD_BLOCKING_END(th);
+	KJ_TRACEBUF_EVENT("THREAD_BLOCKING_END (native_sleep) in 0x%lx", (uintptr_t)th->nt->thread_id, (uintptr_t)GET_THREAD()->nt->thread_id);
 
         rb_sigwait_fd_put(th, sigwait_fd);
     }

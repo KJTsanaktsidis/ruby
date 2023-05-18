@@ -109,4 +109,26 @@ RUBY_SYMBOL_EXPORT_END
 #undef memcpy
 #define memcpy ruby_nonempty_memcpy
 #endif
+
+#include <ruby/atomic.h>
+
+#define KJ_TRACEBUF_SZ (4096 * 1024)
+extern rb_atomic_t kj_tracebuf_ptr;
+extern char kj_tracebuf[KJ_TRACEBUF_SZ][128];
+
+/*
+#define KJ_TRACEBUF_EVENT(fmt, ...) do { \
+	rb_atomic_t _kj_ptr = RUBY_ATOMIC_FETCH_ADD(kj_tracebuf_ptr, 1); \
+	if (_kj_ptr < (KJ_TRACEBUF_SZ - 1)) { \
+		snprintf(kj_tracebuf[_kj_ptr], 128, fmt, __VA_ARGS__); \
+	} else if (_kj_ptr == (KJ_TRACEBUF_SZ - 1)) { \
+		snprintf(kj_tracebuf[_kj_ptr], 128, "TRACEBUF FULL"); \
+	} \
+} while (0);
+*/
+
+
+#define KJ_TRACEBUF_EVENT(fmt, ...) do { } while (0);
+
+
 #endif /* RUBY_INTERNAL_H */

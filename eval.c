@@ -160,12 +160,23 @@ rb_ec_teardown(rb_execution_context_t *ec)
     rb_ec_clear_all_trace_func(ec);
 }
 
+rb_atomic_t kj_tracebuf_ptr = 0;
+char kj_tracebuf[KJ_TRACEBUF_SZ][128] =  { 0 };
+
 static void
 rb_ec_finalize(rb_execution_context_t *ec)
 {
     ruby_sig_finalize();
     ec->errinfo = Qnil;
     rb_objspace_call_finalizer(rb_ec_vm_ptr(ec)->objspace);
+    rb_atomic_t imax = RUBY_ATOMIC_FETCH_ADD(kj_tracebuf_ptr, 0);
+    if (imax > 0) {
+        fprintf(stderr, "-------- TRACE EVENTS --------\n");
+    }
+    for (rb_atomic_t i = 0; i < imax; i++) {
+	if (i >= KJ_TRACEBUF_SZ) { break; }
+        fprintf(stderr, "%s\n", kj_tracebuf[i]);
+    }
 }
 
 void

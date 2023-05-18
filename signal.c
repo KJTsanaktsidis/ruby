@@ -690,6 +690,7 @@ sighandler(int sig)
     int old_errnum = errno;
 
     signal_enque(sig);
+    KJ_TRACEBUF_EVENT("calling rb_thread_wakeup_timer_thread from sighandler (%d) in 0x%lx", sig, (uintptr_t)GET_THREAD()->nt->thread_id);
     rb_thread_wakeup_timer_thread(sig);
 
 #if !defined(BSD_SIGNAL) && !defined(POSIX_SIGNAL)
