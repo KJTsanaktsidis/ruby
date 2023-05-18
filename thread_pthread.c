@@ -506,7 +506,7 @@ thread_sched_to_running_common(struct rb_thread_sched *sched, rb_thread_t *th)
     RB_INTERNAL_THREAD_HOOK(RUBY_INTERNAL_THREAD_EVENT_RESUMED);
 
     if (!sched->timer) {
-        if (!designate_timer_thread(sched) && !ubf_threads_empty()) {
+        if (!designate_timer_thread(sched) && !ubf_threads_empty() && th != sigwait_th) {
             rb_thread_wakeup_timer_thread(-1);
         }
     }
