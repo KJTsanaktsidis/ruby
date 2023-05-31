@@ -59,6 +59,8 @@
  */
 #define RB_NOGVL_UBF_ASYNC_SAFE  (0x2)
 
+#define RB_NOGVL_FORCE_TIMER_THREAD (0x4)
+
 /** @} */
 
 RBIMPL_SYMBOL_EXPORT_BEGIN()

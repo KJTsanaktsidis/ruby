@@ -1540,8 +1540,12 @@ rb_nogvl(void *(*func)(void *), void *data1,
             vm->ubf_async_safe = 1;
         }
         else {
-            ubf_th = rb_thread_start_unblock_thread();
+            flags |= RB_NOGVL_FORCE_TIMER_THREAD;
         }
+    }
+
+    if (flags & RB_NOGVL_FORCE_TIMER_THREAD) {
+        ubf_th = rb_thread_start_unblock_thread();
     }
 
     BLOCKING_REGION(th, {

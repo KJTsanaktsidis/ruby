@@ -5476,7 +5476,7 @@ fptr_finalize_flush(rb_io_t *fptr, int noraise, int keepgvl,
     // Ensure waiting_fd users do not hit EBADF.
     if (busy) {
         // Wait for them to exit before we call close().
-        (void)rb_thread_call_without_gvl(call_close_wait_nogvl, busy, RUBY_UBF_IO, 0);
+        (void)rb_nogvl(call_close_wait_nogvl, busy, RUBY_UBF_IO, 0, RB_NOGVL_FORCE_TIMER_THREAD);
     }
 
     // Disable for now.
