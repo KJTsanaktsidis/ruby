@@ -2527,6 +2527,11 @@ rb_notify_fd_close(int fd, struct rb_io_close_wait_list *busy)
 void
 rb_notify_fd_close_wait(struct rb_io_close_wait_list *busy)
 {
+
+#ifdef RUBY_RACE_TESTS_ENABLED
+    RUBY_DTRACE_RB_NOTIFY_FD_CLOSE_WAIT_START();
+#endif
+
     if (!RB_TEST(busy->wakeup_mutex)) {
         /* There was nobody else using this file when we closed it, so we
            never bothered to allocate a mutex*/

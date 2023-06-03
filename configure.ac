@@ -3690,6 +3690,23 @@ AC_SUBST(DTRACE_REBUILD)
 AC_SUBST(DTRACE_OPT)
 AC_SUBST(LIBRUBY_A_OBJS)
 
+AC_ARG_ENABLE(race-tests,
+        AS_HELP_STRING([--enable-race-tests],
+        [compile Ruby with support for running race-condition tests with bpftrace]),
+        [enable_race_tests=$enableval], [enable_race_tests=no])
+AS_IF([test "${enable_race_tests}" = "yes"], [
+    AS_IF([test "${enable_dtrace}" != "yes"], [
+        AC_MSG_ERROR([--enable-race-tests, however, dtrace/USDT probe support is required])
+    ])
+    AS_IF([test "${pie}" = "yes"], [
+        AC_MSG_ERROR([--enable-race-tests, however, PIE support must also be disabled with --disable-pie])
+    ])
+    AC_DEFINE(RUBY_RACE_TESTS_ENABLED, 1)
+    RUBY_RACE_TESTS_ENABLED="yes"
+])
+dnl So it can appear in rbconfig
+AC_SUBST(RUBY_RACE_TESTS_ENABLED)
+
 AC_ARG_ENABLE(gcov,
        AS_HELP_STRING([--enable-gcov], [enable coverage measurement by gcov]),
        [gcov=yes])

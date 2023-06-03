@@ -15,6 +15,7 @@
 
 #include "ruby/fiber/scheduler.h"
 #include "ruby/io/buffer.h"
+#include "probes.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -12510,6 +12511,10 @@ nogvl_wait_for(VALUE th, rb_io_t *fptr, short events, struct timeval *timeout)
     if (timeout) {
         timeout_milliseconds = (int)(timeout->tv_sec * 1000) + (int)(timeout->tv_usec / 1000);
     }
+
+#ifdef RUBY_RACE_TESTS_ENABLED
+    RUBY_DTRACE_NOGVL_WAIT_FOR_PRE_POLL();
+#endif
 
     return poll(&fds, 1, timeout_milliseconds);
 }

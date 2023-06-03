@@ -1,5 +1,6 @@
 /* -*- c -*- */
 #include "vm_opts.h"
+#include "ruby/config.h"
 
 provider ruby {
   /*
@@ -214,6 +215,11 @@ provider ruby {
      Fired at the end of a sweep phase.
   */
   probe gc__sweep__end();
+
+#ifdef RUBY_RACE_TESTS_ENABLED
+   probe nogvl__wait__for__pre__poll();
+   probe rb__notify__fd__close__wait__start();
+#endif
 };
 
 #pragma D attributes Stable/Evolving/Common provider ruby provider
