@@ -13,6 +13,8 @@
 
 #include "internal/gc.h"
 #include "rjit.h"
+#include "probes.h"
+#include <sys/types.h>
 
 #ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
@@ -59,6 +61,7 @@ static pthread_condattr_t *condattr_monotonic = &condattr_mono;
 #else
 static const void *const condattr_monotonic = NULL;
 #endif
+
 
 // native thread wrappers
 
@@ -241,9 +244,35 @@ rb_native_cond_timedwait(rb_nativethread_cond_t *cond, pthread_mutex_t *mutex, u
 
 // thread scheduling
 
+static inline void
+fire_thread_dtrace_probes(int event)
+{
+    pid_t tid = gettid();
+    switch (event) {
+    case RUBY_INTERNAL_THREAD_EVENT_STARTED:
+        RUBY_DTRACE_THREAD_STARTED(tid);
+        break;
+    case RUBY_INTERNAL_THREAD_EVENT_READY:
+        RUBY_DTRACE_THREAD_READY(tid);
+        break;
+    case RUBY_INTERNAL_THREAD_EVENT_RESUMED:
+        RUBY_DTRACE_THREAD_RESUMED(tid);
+        break;
+    case RUBY_INTERNAL_THREAD_EVENT_SUSPENDED:
+        RUBY_DTRACE_THREAD_SUSPENDED(tid);
+        break;
+    case RUBY_INTERNAL_THREAD_EVENT_EXITED:
+        RUBY_DTRACE_THREAD_EXITED(tid);
+        break;
+    }
+}
+
 static rb_internal_thread_event_hook_t *rb_internal_thread_event_hooks = NULL;
 static void rb_thread_execute_hooks(rb_event_flag_t event);
-#define RB_INTERNAL_THREAD_HOOK(event) if (rb_internal_thread_event_hooks) { rb_thread_execute_hooks(event); }
+#define RB_INTERNAL_THREAD_HOOK(event) do { \
+    fire_thread_dtrace_probes(event); \
+    if (rb_internal_thread_event_hooks) { rb_thread_execute_hooks(event); } \
+} while (0);
 
 static rb_serial_t current_fork_gen = 1; /* We can't use GET_VM()->fork_gen */
 

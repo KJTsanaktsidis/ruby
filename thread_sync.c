@@ -43,6 +43,14 @@ sync_wakeup(struct ccan_list_head *head, long max)
 {
     struct sync_waiter *cur = 0, *next;
 
+    uint64_t candidates[8] = {0};
+    int i = 0;
+    ccan_list_for_each_safe(head, cur, next, node) {
+        if (i >= 8) break;
+        candidates[i] = cur->th->nt->tid;
+        i++;
+    }
+
     ccan_list_for_each_safe(head, cur, next, node) {
         ccan_list_del_init(&cur->node);
 
@@ -51,8 +59,12 @@ sync_wakeup(struct ccan_list_head *head, long max)
                 rb_fiber_scheduler_unblock(cur->th->scheduler, cur->self, rb_fiberptr_self(cur->fiber));
             }
             else {
+                VALUE self_str = rb_inspect(cur->self);
+                char *self_cstr = rb_str_to_cstr(self_str);
+                RUBY_DTRACE_SYNC_WAKEUP(gettid(), cur->th->nt->tid, &candidates, self_cstr);
                 rb_threadptr_interrupt(cur->th);
                 cur->th->status = THREAD_RUNNABLE;
+                RB_GC_GUARD(self_str);
             }
 
             if (--max == 0) return;
@@ -528,19 +540,34 @@ rb_mutex_abandon_all(rb_mutex_t *mutexes)
 }
 #endif
 
+struct mutex_sleep_args {
+    VALUE self;
+    char *self_cstr;
+    rb_hrtime_t rel;
+};
+
 static VALUE
-rb_mutex_sleep_forever(VALUE self)
+rb_mutex_sleep_forever(VALUE vargs)
 {
-    rb_thread_sleep_deadly_allow_spurious_wakeup(self, Qnil, 0);
+
+    struct mutex_sleep_args *args = (struct mutex_sleep_args *)vargs; 
+    RUBY_DTRACE_SYNC_MUTEX_SLEEP(gettid(), args->self_cstr);
+    rb_thread_sleep_deadly_allow_spurious_wakeup(args->self, Qnil, 0);
+    RUBY_DTRACE_SYNC_MUTEX_WOKEN(gettid(), 1, args->self_cstr);
     return Qnil;
 }
 
 static VALUE
-rb_mutex_wait_for(VALUE time)
+rb_mutex_wait_for(VALUE vargs)
 {
-    rb_hrtime_t *rel = (rb_hrtime_t *)time;
+    struct mutex_sleep_args *args = (struct mutex_sleep_args *)vargs; 
+
+
+    RUBY_DTRACE_SYNC_MUTEX_SLEEP(gettid(), args->self_cstr);
     /* permit spurious check */
-    return RBOOL(sleep_hrtime(GET_THREAD(), *rel, 0));
+    bool did_get_woken = sleep_hrtime(GET_THREAD(), args->rel, 0);
+    RUBY_DTRACE_SYNC_MUTEX_WOKEN(gettid(), did_get_woken, args->self_cstr);
+    return RBOOL(did_get_woken);
 }
 
 VALUE
@@ -562,13 +589,20 @@ rb_mutex_sleep(VALUE self, VALUE timeout)
         mutex_lock_uninterruptible(self);
     }
     else {
+        VALUE self_str = rb_inspect(self);
+        struct mutex_sleep_args args;
+        args.self = self;
+        args.self_cstr = rb_str_to_cstr(self_str);
         if (NIL_P(timeout)) {
-            rb_ensure(rb_mutex_sleep_forever, self, mutex_lock_uninterruptible, self);
+            rb_ensure(rb_mutex_sleep_forever, (VALUE)&args, mutex_lock_uninterruptible, self);
         }
         else {
             rb_hrtime_t rel = rb_timeval2hrtime(&t);
-            woken = rb_ensure(rb_mutex_wait_for, (VALUE)&rel, mutex_lock_uninterruptible, self);
+            args.rel = rel;
+            woken = rb_ensure(rb_mutex_wait_for, (VALUE)&args, mutex_lock_uninterruptible, self);
         }
+
+        RB_GC_GUARD(self_str);
     }
 
     RUBY_VM_CHECK_INTS_BLOCKING(GET_EC());

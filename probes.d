@@ -214,6 +214,15 @@ provider ruby {
      Fired at the end of a sweep phase.
   */
   probe gc__sweep__end();
+
+  probe thread__started(uint64_t native_thread_id);
+  probe thread__ready(uint64_t native_thread_id);
+  probe thread__resumed(uint64_t native_thread_id);
+  probe thread__suspended(uint64_t native_thread_id);
+  probe thread__exited(uint64_t native_thread_id);
+  probe sync__wakeup(uint64_t waking_thread_id, uint64_t woke_thread_id, uint64_t *candiates[8], char *waiter);
+  probe sync__mutex__sleep(uint64_t native_thread_id, char *waiter);
+  probe sync__mutex__woken(uint64_t native_thread_id, uint64_t interrupted, char *waiter);
 };
 
 #pragma D attributes Stable/Evolving/Common provider ruby provider
