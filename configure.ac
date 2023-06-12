@@ -3701,11 +3701,16 @@ AS_IF([test "${enable_race_tests}" = "yes"], [
     AS_IF([test "${pie}" = "yes"], [
         AC_MSG_ERROR([--enable-race-tests, however, PIE support must also be disabled with --disable-pie])
     ])
+    AC_PATH_PROG(GDB, [gdb], [no])
+    AS_IF([test "${GDB}" = "no"], [
+        AC_MSG_ERROR([--enable-race-tests, however, GDB was not found])
+    ])
     AC_DEFINE(RUBY_RACE_TESTS_ENABLED, 1)
     RUBY_RACE_TESTS_ENABLED="yes"
 ])
 dnl So it can appear in rbconfig
 AC_SUBST(RUBY_RACE_TESTS_ENABLED)
+AC_SUBST(GDB)
 
 AC_ARG_ENABLE(gcov,
        AS_HELP_STRING([--enable-gcov], [enable coverage measurement by gcov]),

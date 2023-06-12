@@ -99,6 +99,7 @@
 #include "ractor_core.h"
 #include "vm_debug.h"
 #include "vm_sync.h"
+#include "probes.h"
 
 #if USE_RJIT && defined(HAVE_SYS_WAIT_H)
 #include <sys/wait.h>
