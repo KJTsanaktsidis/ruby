@@ -24,7 +24,7 @@ rule
                         result = {val[0].key => val[0].value}
                       }
                       | kv_list COMMA kv_pair {
-                        result = value[0].merge({
+                        result = val[0].merge({
                           val[2].key => val[2].value}
                         )
                       }

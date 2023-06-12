@@ -133,7 +133,6 @@ Racc_arg = [
   racc_shift_n,
   racc_reduce_n,
   racc_use_result_var ]
-Ractor.make_shareable(Racc_arg) if defined?(Ractor)
 
 Racc_token_to_s_table = [
   "$end",
@@ -174,7 +173,6 @@ Racc_token_to_s_table = [
   "maybe_list_elts",
   "list_elts",
   "c_string_contents" ]
-Ractor.make_shareable(Racc_token_to_s_table) if defined?(Ractor)
 
 Racc_debug_parser = false
 
@@ -252,7 +250,7 @@ module_eval(<<'.,.,', 'gdbmi_parser.y', 23)
 
 module_eval(<<'.,.,', 'gdbmi_parser.y', 26)
   def _reduce_11(val, _values, result)
-                            result = value[0].merge({
+                            result = val[0].merge({
                           val[2].key => val[2].value}
                         )
 

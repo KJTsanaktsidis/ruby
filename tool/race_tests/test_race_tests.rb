@@ -54,8 +54,7 @@ class TestRaceTests < Test::Unit::TestCase
     RUBY
 
     RaceTests::Execution.new(program).run do |e|
-      e.gdb.set('auto-load', 'off')
-      e.gdb.set('debuginfod enabled', 'off')
+      pp e.gdb.get_target_env
     end
     # puts "STDOUT READ -> #{e.stdout.gets}"
     # puts "STDERR READ -> #{e.stderr.gets}"
