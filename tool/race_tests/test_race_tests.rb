@@ -50,11 +50,11 @@ class TestRaceTests < Test::Unit::TestCase
     program = <<~RUBY
       $stdout.puts "stdout"
       $stderr.puts "stderr"
-      sleep 10
+      sleep 3
     RUBY
 
     RaceTests::Execution.new(program).run do |e|
-      pp e.gdb.get_target_env
+      # pp e.gdb.get_target_env
     end
     # puts "STDOUT READ -> #{e.stdout.gets}"
     # puts "STDERR READ -> #{e.stderr.gets}"
