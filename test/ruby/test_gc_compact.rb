@@ -427,19 +427,20 @@ class TestGCCompact < Test::Unit::TestCase
     #   Expected 499 to be >= 500.
     omit if /sparc-solaris/ =~ RUBY_PLATFORM
 
-    assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10, signal: :SEGV)
+    assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 1000, signal: :SEGV)
     begin;
-      HASH_COUNT = 500
+      HASH_COUNT = 50000
 
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
       base_hash = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 }
       ary = HASH_COUNT.times.map { base_hash.dup }
-      ary.each { |h| h[:i] = 9 }
+      ary.each_with_index { |h, i| h[:i] = 9 }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
 
-      assert_operator(stats[:moved_down][:T_HASH], :>=, 500)
+      pp stats
+      assert_operator(stats[:moved_down][:T_HASH], :>=, HASH_COUNT)
     end;
   end
 

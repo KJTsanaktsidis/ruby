@@ -930,6 +930,9 @@ typedef struct rb_objspace {
 
     struct {
         size_t considered_count_table[T_MASK];
+        size_t pinned_count_table[T_MASK];
+        size_t gc_compact_move_failed_count_table[T_MASK];
+        size_t cursors_met_count_table[T_MASK];
         size_t moved_count_table[T_MASK];
         size_t moved_up_count_table[T_MASK];
         size_t moved_down_count_table[T_MASK];
@@ -937,6 +940,7 @@ typedef struct rb_objspace {
 
         /* This function will be used, if set, to sort the heap prior to compaction */
         gc_compact_compare_func compare_func;
+        int compact_direction;
     } rcompactor;
 
     struct {
@@ -3890,6 +3894,7 @@ Init_gc_stress(void)
 }
 
 typedef int each_obj_callback(void *, void *, size_t, void *);
+typedef int each_page_callback(struct heap_page *, void *);
 
 static void objspace_each_objects(rb_objspace_t *objspace, each_obj_callback *callback, void *data, bool protected);
 static void objspace_reachable_objects_from_root(rb_objspace_t *, void (func)(const char *, VALUE, void *), void *);
@@ -3898,7 +3903,8 @@ struct each_obj_data {
     rb_objspace_t *objspace;
     bool reenable_incremental;
 
-    each_obj_callback *callback;
+    each_obj_callback *each_obj_callback;
+    each_page_callback *each_page_callback;
     void *data;
 
     struct heap_page **pages[SIZE_POOL_COUNT];
@@ -3972,9 +3978,15 @@ objspace_each_objects_try(VALUE arg)
             uintptr_t pstart = (uintptr_t)page->start;
             uintptr_t pend = pstart + (page->total_slots * size_pool->slot_size);
 
-            if (!__asan_region_is_poisoned((void *)pstart, pend - pstart) &&
-                (*data->callback)((void *)pstart, (void *)pend, size_pool->slot_size, data->data)) {
-                break;
+            if (!__asan_region_is_poisoned((void *)pstart, pend - pstart)) {
+                if (data->each_obj_callback &&
+                    (*data->each_obj_callback)((void *)pstart, (void *)pend, size_pool->slot_size, data->data)) {
+                    break;
+                }
+                if (data->each_page_callback &&
+                    (*data->each_page_callback)(page, data->data)) {
+                    break;
+                }
             }
 
             page = ccan_list_next(&SIZE_POOL_EDEN_HEAP(size_pool)->pages, page, page_node);
@@ -4029,9 +4041,10 @@ rb_objspace_each_objects(each_obj_callback *callback, void *data)
 }
 
 static void
-objspace_each_objects(rb_objspace_t *objspace, each_obj_callback *callback, void *data, bool protected)
+objspace_each_exec(bool protected, struct each_obj_data *each_obj_data)
 {
     /* Disable incremental GC */
+    rb_objspace_t *objspace = each_obj_data->objspace;
     bool reenable_incremental = FALSE;
     if (protected) {
         reenable_incremental = !objspace->flags.dont_incremental;
@@ -4040,18 +4053,35 @@ objspace_each_objects(rb_objspace_t *objspace, each_obj_callback *callback, void
         objspace->flags.dont_incremental = TRUE;
     }
 
+    each_obj_data->reenable_incremental = reenable_incremental;
+    memset(&each_obj_data->pages, 0, sizeof(each_obj_data->pages));
+    memset(&each_obj_data->pages_counts, 0, sizeof(each_obj_data->pages_counts));
+    rb_ensure(objspace_each_objects_try, (VALUE)each_obj_data,
+              objspace_each_objects_ensure, (VALUE)each_obj_data);
+}
+
+static void
+objspace_each_objects(rb_objspace_t *objspace, each_obj_callback *callback, void *data, bool protected)
+{
     struct each_obj_data each_obj_data = {
         .objspace = objspace,
-        .reenable_incremental = reenable_incremental,
-
-        .callback = callback,
+        .each_obj_callback = callback,
+        .each_page_callback = NULL,
         .data = data,
-
-        .pages = {NULL},
-        .pages_counts = {0},
     };
-    rb_ensure(objspace_each_objects_try, (VALUE)&each_obj_data,
-              objspace_each_objects_ensure, (VALUE)&each_obj_data);
+    objspace_each_exec(protected, &each_obj_data);
+}
+
+static void
+objspace_each_pages(rb_objspace_t *objspace, each_page_callback *callback, void *data, bool protected)
+{
+    struct each_obj_data each_obj_data = {
+        .objspace = objspace,
+        .each_obj_callback = NULL,
+        .each_page_callback = callback,
+        .data = data,
+    };
+    objspace_each_exec(protected, &each_obj_data);
 }
 
 void
@@ -6125,6 +6155,9 @@ gc_compact_start(rb_objspace_t *objspace)
     }
 
     memset(objspace->rcompactor.considered_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.pinned_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.gc_compact_move_failed_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.cursors_met_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_up_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_down_count_table, 0, T_MASK * sizeof(size_t));
@@ -8511,6 +8544,7 @@ gc_compact_move(rb_objspace_t *objspace, rb_heap_t *heap, rb_size_pool_t *size_p
     rb_shape_t *orig_shape = NULL;
 
     if (gc_compact_heap_cursors_met_p(dheap)) {
+        objspace->rcompactor.cursors_met_count_table[BUILTIN_TYPE(src)]++;
         return dheap != heap;
     }
 
@@ -8580,8 +8614,11 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
             if (gc_is_moveable_obj(objspace, vp)) {
                 if (!gc_compact_move(objspace, heap, size_pool, vp)) {
                     //the cursors met. bubble up
+                    objspace->rcompactor.gc_compact_move_failed_count_table[BUILTIN_TYPE(vp)]++;
                     return false;
                 }
+            } else {
+                objspace->rcompactor.pinned_count_table[BUILTIN_TYPE(vp)]++;
             }
         }
         p += slot_size;
@@ -8651,9 +8688,29 @@ gc_sweep_compact(rb_objspace_t *objspace)
 
     while (!gc_compact_all_compacted_p(objspace)) {
         for (int i = 0; i < SIZE_POOL_COUNT; i++) {
-            rb_size_pool_t *size_pool = &size_pools[i];
+            rb_size_pool_t *size_pool;
+            if (objspace->rcompactor.compact_direction == 1) {
+                size_pool = &size_pools[SIZE_POOL_COUNT - i - 1];
+            } else {
+                size_pool = &size_pools[i];
+            }
             rb_heap_t *heap = SIZE_POOL_EDEN_HEAP(size_pool);
 
+            while (!gc_compact_heap_cursors_met_p(heap)) {
+                struct heap_page *start_page = heap->compact_cursor;
+
+                if (!gc_compact_page(objspace, size_pool, heap, start_page)) {
+                    lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
+
+                    continue;
+                }
+
+                // If we get here, we've finished moving all objects on the compact_cursor page
+                // So we can lock it and move the cursor on to the next one.
+                lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
+                heap->compact_cursor = ccan_list_prev(&heap->pages, heap->compact_cursor, page_node);
+            }
+            /*
             if (gc_compact_heap_cursors_met_p(heap)) {
                 continue;
             }
@@ -8670,6 +8727,7 @@ gc_sweep_compact(rb_objspace_t *objspace)
             // So we can lock it and move the cursor on to the next one.
             lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
             heap->compact_cursor = ccan_list_prev(&heap->pages, heap->compact_cursor, page_node);
+            */
         }
     }
 
@@ -10889,6 +10947,9 @@ gc_compact_stats(VALUE self)
     rb_objspace_t *objspace = &rb_objspace;
     VALUE h = rb_hash_new();
     VALUE considered = rb_hash_new();
+    VALUE pinned = rb_hash_new();
+    VALUE gc_compact_move_failed = rb_hash_new();
+    VALUE cursors_met = rb_hash_new();
     VALUE moved = rb_hash_new();
     VALUE moved_up = rb_hash_new();
     VALUE moved_down = rb_hash_new();
@@ -10896,6 +10957,18 @@ gc_compact_stats(VALUE self)
     for (i=0; i<T_MASK; i++) {
         if (objspace->rcompactor.considered_count_table[i]) {
             rb_hash_aset(considered, type_sym(i), SIZET2NUM(objspace->rcompactor.considered_count_table[i]));
+        }
+
+        if (objspace->rcompactor.pinned_count_table[i]) {
+            rb_hash_aset(pinned, type_sym(i), SIZET2NUM(objspace->rcompactor.pinned_count_table[i]));
+        }
+
+        if (objspace->rcompactor.gc_compact_move_failed_count_table[i]) {
+            rb_hash_aset(gc_compact_move_failed, type_sym(i), SIZET2NUM(objspace->rcompactor.gc_compact_move_failed_count_table[i]));
+        }
+
+        if (objspace->rcompactor.cursors_met_count_table[i]) {
+            rb_hash_aset(cursors_met, type_sym(i), SIZET2NUM(objspace->rcompactor.cursors_met_count_table[i]));
         }
 
         if (objspace->rcompactor.moved_count_table[i]) {
@@ -10912,6 +10985,9 @@ gc_compact_stats(VALUE self)
     }
 
     rb_hash_aset(h, ID2SYM(rb_intern("considered")), considered);
+    rb_hash_aset(h, ID2SYM(rb_intern("pinned")), pinned);
+    rb_hash_aset(h, ID2SYM(rb_intern("gc_compact_move_failed")), gc_compact_move_failed);
+    rb_hash_aset(h, ID2SYM(rb_intern("cursors_met")), cursors_met);
     rb_hash_aset(h, ID2SYM(rb_intern("moved")), moved);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_up")), moved_up);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_down")), moved_down);
@@ -11001,6 +11077,39 @@ gc_compact(VALUE self)
 #endif
 
 #if GC_CAN_COMPILE_COMPACTION
+
+struct desired_compaction_pages_i_data {
+    rb_objspace_t *objspace;
+    size_t required_slots[SIZE_POOL_COUNT];
+};
+
+static int
+desired_compaction_pages_i(struct heap_page *page, void *data)
+{
+    struct desired_compaction_pages_i_data *tdata = data;
+    rb_objspace_t *objspace = tdata->objspace;
+    VALUE vstart = (VALUE)page->start;
+    VALUE vend = vstart + (VALUE)(page->total_slots * page->size_pool->slot_size);
+
+
+    for (VALUE v = vstart; v != vend; v += page->size_pool->slot_size) {
+        void *poisoned = asan_unpoison_object_temporary(v);
+
+        rb_size_pool_t *dest_pool = gc_compact_destination_pool(objspace, page->size_pool, v);
+        if (dest_pool != page->size_pool) {
+            size_t dest_pool_idx = dest_pool - size_pools;
+            tdata->required_slots[dest_pool_idx]++;
+        }
+
+        if (poisoned) {
+            GC_ASSERT(BUILTIN_TYPE(v) == T_NONE);
+            asan_poison_object(v);
+        }
+    }
+
+    return 0;
+}
+
 static VALUE
 gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE double_heap, VALUE expand_heap, VALUE toward_empty)
 {
@@ -11019,16 +11128,26 @@ gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE do
 
         /* if both double_heap and expand_heap are set, expand_heap takes precedence */
         if (RTEST(double_heap) || RTEST(expand_heap)) {
+            struct desired_compaction_pages_i_data desired_compaction = {
+                .objspace = objspace,
+                .required_slots = {0},
+            };
+            if (RTEST(expand_heap)) {
+                objspace_each_pages(objspace, desired_compaction_pages_i, &desired_compaction, TRUE);
+            }
+
             for (int i = 0; i < SIZE_POOL_COUNT; i++) {
                 rb_size_pool_t *size_pool = &size_pools[i];
                 rb_heap_t *heap = SIZE_POOL_EDEN_HEAP(size_pool);
 
                 size_t minimum_pages = 0;
+                size_t required_pages_to_fit = 0;
                 if (RTEST(expand_heap)) {
                     minimum_pages = minimum_pages_for_size_pool(objspace, size_pool);
+                    required_pages_to_fit = slots_to_pages_for_size_pool(objspace, size_pool, desired_compaction.required_slots[i]);
                 }
-
-                heap_add_pages(objspace, size_pool, heap, MAX(minimum_pages, heap->total_pages));
+                size_t pages_to_add = MAX(heap->total_pages, MAX(minimum_pages, required_pages_to_fit));
+                heap_add_pages(objspace, size_pool, heap, pages_to_add);
             }
         }
 
@@ -11038,7 +11157,10 @@ gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE do
     }
     RB_VM_LOCK_LEAVE();
 
+    int old_direction = objspace->rcompactor.compact_direction;
+    objspace->rcompactor.compact_direction = 1;
     gc_start_internal(NULL, self, Qtrue, Qtrue, Qtrue, Qtrue);
+    objspace->rcompactor.compact_direction = old_direction;
 
     objspace_reachable_objects_from_root(objspace, root_obj_check_moved_i, NULL);
     objspace_each_objects(objspace, heap_check_moved_i, NULL, TRUE);
