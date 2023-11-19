@@ -726,15 +726,10 @@ typedef struct rb_vm_struct {
     /* relation table of ensure - rollback for callcc */
     struct st_table *ensure_rollback_table;
 
-    /* postponed_job (async-signal-safe, NOT thread-safe) */
-    struct rb_postponed_job_struct *postponed_job_buffer;
-    rb_atomic_t postponed_job_index;
+    /* postponed_job (async-signal-safe, and thread-safe) */
+    struct rb_postponed_job_queues *postponed_job_queues;
 
     int src_encoding_index;
-
-    /* workqueue (thread-safe, NOT async-signal-safe) */
-    struct ccan_list_head workqueue; /* <=> rb_workqueue_job.jnode */
-    rb_nativethread_lock_t workqueue_lock;
 
     VALUE orig_progname, progname;
     VALUE coverages, me2counter;
@@ -1830,7 +1825,6 @@ static inline void
 rb_vm_living_threads_init(rb_vm_t *vm)
 {
     ccan_list_head_init(&vm->waiting_fds);
-    ccan_list_head_init(&vm->workqueue);
     ccan_list_head_init(&vm->ractor.set);
     ccan_list_head_init(&vm->ractor.sched.zombie_threads);
 }
@@ -2170,6 +2164,7 @@ rb_exec_event_hook_script_compiled(rb_execution_context_t *ec, const rb_iseq_t *
 }
 
 void rb_vm_trap_exit(rb_vm_t *vm);
+void rb_vm_postponed_job_atfork(void); /* vm_trace.c */
 
 RUBY_SYMBOL_EXPORT_BEGIN
 

@@ -19648,6 +19648,7 @@ vm_trace.$(OBJEXT): $(top_srcdir)/internal/imemo.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/serial.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/static_assert.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/symbol.h
+vm_trace.$(OBJEXT): $(top_srcdir)/internal/thread.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/variable.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/vm.h
 vm_trace.$(OBJEXT): $(top_srcdir)/internal/warnings.h

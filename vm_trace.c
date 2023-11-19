@@ -24,10 +24,13 @@
 #include "eval_intern.h"
 #include "internal.h"
 #include "internal/class.h"
+#include "internal/gc.h"
 #include "internal/hash.h"
 #include "internal/symbol.h"
+#include "internal/thread.h"
 #include "iseq.h"
 #include "rjit.h"
+#include "ruby/atomic.h"
 #include "ruby/debug.h"
 #include "vm_core.h"
 #include "ruby/ractor.h"
@@ -1616,80 +1619,84 @@ Init_vm_trace(void)
     rb_undef_alloc_func(rb_cTracePoint);
 }
 
-typedef struct rb_postponed_job_struct {
+/*
+ * rb_postponed_job_queues_t is actually _two_ separate queues.
+ *
+ * The first queue, the "blocking" queue, is a st_table with potentially
+ * duplicate entries implementing a list of func -> data pairs. This queue is
+ * protected by a mutex and is accessed by the rb_workqueue* family of
+ * functions. Jobs can be enqueued into this queue from arbitrary threads with
+ * or without the GVL, but can NOT be enqueued from signal handlers. It's
+ * _guaranteed_ that we can enqueue a job into this queue, no matter what (but
+ * it might allocate).
+ *
+ * The second queue, the "async" queue, is a fixed-size, lock-free ringbuffer
+ * with a list of rb_pjob_async_t objects. This queue is safe to enqueue into
+ * from arbitrary threads and even from inside signal handlers. It will never
+ * block; however, if the fixed size buffer is full, it might fail to enqueue
+ * the job and return an error.
+ *
+ * Generally, you should use the blocking queue to enqueue jobs, leaving the
+ * async queue for situations where blocking would be unacceptable (such as
+ * signal handlers)
+ */
+#define MAX_POSTPONED_JOB_ASYNC             1024
+#define PJOB_ASYNC_FLAG_READY               (1 << 0)
+#define PJOB_ASYNC_FLAG_ABANDONED           (1 << 1)
+#define PJOB_ASYNC_FLAG_ONCE                (1 << 2)
+#define PJOB_ASYNC_MASK_ENQUEUE_INDEX       0x0000FFFF
+#define PJOB_ASYNC_SHIFT_ENQUEUE_INDEX      0
+#define PJOB_ASYNC_MASK_COUNT               0xFFFF0000
+#define PJOB_ASYNC_SHIFT_COUNT              16
+typedef struct rb_pjob_async_t {
     rb_postponed_job_func_t func;
     void *data;
-} rb_postponed_job_t;
+    rb_atomic_t flags;
+} rb_pjob_async_t;
 
-#define MAX_POSTPONED_JOB                  1000
-#define MAX_POSTPONED_JOB_SPECIAL_ADDITION   24
+typedef struct rb_postponed_job_queues {
+    struct {
+        rb_nativethread_lock_t lock;
+        struct st_table *table;
+    } blocking;
+    struct {
+        /* this field stores the enqueue index for where to insert more jobs in
+         * the first 16 bits, and the count in the next 16 bits. Stuffing this into
+         * the same field allows us to atomically update both the count and position */
+        rb_atomic_t enqueue_index_and_count;
+        rb_atomic_t dequeue_index;
+        /* rb_atomic_t, because size & count should have the same type. count is
+         * accessed atomically, but size is only set once. */
+        rb_atomic_t ringbuf_size;
+        rb_pjob_async_t ringbuf[MAX_POSTPONED_JOB_ASYNC];
+    } async;
+} rb_postponed_job_queues_t;
 
-struct rb_workqueue_job {
-    struct ccan_list_node jnode; /* <=> vm->workqueue */
-    rb_postponed_job_t job;
-};
-
-// Used for VM memsize reporting. Returns the size of a list of rb_workqueue_job
-// structs. Defined here because the struct definition lives here as well.
-size_t
-rb_vm_memsize_workqueue(struct ccan_list_head *workqueue)
-{
-    struct rb_workqueue_job *work = 0;
-    size_t size = 0;
-
-    ccan_list_for_each(workqueue, work, jnode) {
-        size += sizeof(struct rb_workqueue_job);
-    }
-
-    return size;
-}
-
-// Used for VM memsize reporting. Returns the total size of the postponed job
-// buffer that was allocated at initialization.
-size_t
-rb_vm_memsize_postponed_job_buffer(void)
-{
-    return sizeof(rb_postponed_job_t) * MAX_POSTPONED_JOB;
-}
 
 void
 Init_vm_postponed_job(void)
 {
-    rb_vm_t *vm = GET_VM();
-    vm->postponed_job_buffer = ALLOC_N(rb_postponed_job_t, MAX_POSTPONED_JOB);
-    vm->postponed_job_index = 0;
-    /* workqueue is initialized when VM locks are initialized */
+    rb_postponed_job_queues_t *pjq = ruby_xmalloc(sizeof(rb_postponed_job_queues_t));
+    rb_nativethread_lock_initialize(&pjq->blocking.lock);
+    pjq->blocking.table = st_init_numtable();
+    pjq->async.enqueue_index_and_count = 0;
+    pjq->async.dequeue_index = 0;
+    pjq->async.ringbuf_size = MAX_POSTPONED_JOB_ASYNC;
+    memset(pjq->async.ringbuf, 0, sizeof(rb_pjob_async_t) * MAX_POSTPONED_JOB_ASYNC);
+    GET_VM()->postponed_job_queues = pjq;
 }
 
-enum postponed_job_register_result {
-    PJRR_SUCCESS     = 0,
-    PJRR_FULL        = 1,
-    PJRR_INTERRUPTED = 2
-};
-
-/* Async-signal-safe */
-static enum postponed_job_register_result
-postponed_job_register(rb_execution_context_t *ec, rb_vm_t *vm,
-                       unsigned int flags, rb_postponed_job_func_t func, void *data, rb_atomic_t max, rb_atomic_t expected_index)
+// Used for VM memsize reporting. Returns the total size of the postponed job
+// queue infrastructure.
+size_t
+rb_vm_memsize_postponed_job_queues(void)
 {
-    rb_postponed_job_t *pjob;
-
-    if (expected_index >= max) return PJRR_FULL; /* failed */
-
-    if (ATOMIC_CAS(vm->postponed_job_index, expected_index, expected_index+1) == expected_index) {
-        pjob = &vm->postponed_job_buffer[expected_index];
+    rb_postponed_job_queues_t *pjq = GET_VM()->postponed_job_queues;
+    size_t sz = sizeof(*pjq);
+    if (pjq->blocking.table) {
+        sz += st_memsize(pjq->blocking.table);
     }
-    else {
-        return PJRR_INTERRUPTED;
-    }
-
-    /* unused: pjob->flags = flags; */
-    pjob->func = func;
-    pjob->data = data;
-
-    RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
-
-    return PJRR_SUCCESS;
+    return sz;
 }
 
 static rb_execution_context_t *
@@ -1700,23 +1707,201 @@ get_valid_ec(rb_vm_t *vm)
     return ec;
 }
 
-/*
- * return 0 if job buffer is full
- * Async-signal-safe
+static inline void
+pjob_async_increment_index_with_wrap(rb_postponed_job_queues_t *pjq, rb_atomic_t *index)
+{
+    (*index)++;
+    if (*index == pjq->async.ringbuf_size) {
+        *index = 0;
+    }
+}
+
+static inline void
+pjob_async_decrement_index_with_wrap(rb_postponed_job_queues_t *pjq, rb_atomic_t *index)
+{
+    if (*index == 0) {
+        *index = pjq->async.ringbuf_size - 1;
+    } else {
+        (*index)--;
+    }
+}
+
+static inline void
+pjob_async_decompose_enqueue_index_and_count(rb_atomic_t combined, rb_atomic_t *enqueue_index, rb_atomic_t *count)
+{
+    if (enqueue_index) {
+        *enqueue_index = (combined & PJOB_ASYNC_MASK_ENQUEUE_INDEX) >> PJOB_ASYNC_SHIFT_ENQUEUE_INDEX;
+    }
+    if (count) {
+        *count = (combined& PJOB_ASYNC_MASK_COUNT) >> PJOB_ASYNC_SHIFT_COUNT;
+    }
+}
+
+static inline rb_atomic_t
+pjob_async_compose_enqueue_index_and_count(rb_atomic_t enqueue_index, rb_atomic_t count)
+{
+    return ((count << PJOB_ASYNC_SHIFT_COUNT) & PJOB_ASYNC_MASK_COUNT) |
+            ((enqueue_index << PJOB_ASYNC_SHIFT_ENQUEUE_INDEX) & PJOB_ASYNC_MASK_ENQUEUE_INDEX);
+}
+
+static inline rb_atomic_t
+pjob_async_count_subtract(rb_postponed_job_queues_t *pjq, rb_atomic_t sub)
+{
+    /* this load doesn't need to be atomic because we CAS it later */
+    rb_atomic_t old_combined = pjq->async.enqueue_index_and_count;
+    rb_atomic_t old_enqueue_index, old_count, new_count, new_combined, cas_result;
+    while (true) {
+        pjob_async_decompose_enqueue_index_and_count(old_combined, &old_enqueue_index, &old_count);
+        new_count = old_count - sub;
+
+        new_combined = pjob_async_compose_enqueue_index_and_count(old_enqueue_index, new_count);
+        cas_result = RUBY_ATOMIC_CAS(pjq->async.enqueue_index_and_count, old_combined, new_combined);
+        if (cas_result == old_combined) {
+            break;
+        }
+        old_combined = cas_result;
+    }
+
+    pjob_async_decompose_enqueue_index_and_count(old_combined, NULL, &old_count);
+    return old_count;
+
+}
+
+static inline bool
+pjob_blocking_disable_gc(void)
+{
+    if (!ruby_thread_has_gvl_p()) {
+        return false;
+    }
+    return !RB_TEST(rb_gc_disable_no_rest());
+}
+
+static inline void
+pjob_blocking_reenable_gc(bool was_enabled)
+{
+    if (!was_enabled) {
+        return;
+    }
+    rb_gc_enable();
+}
+
+void
+rb_vm_postponed_job_atfork(void)
+{
+    rb_vm_t *vm = GET_VM();
+    rb_postponed_job_queues_t *pjq = vm->postponed_job_queues;
+
+    /* at fork, need to re-initialize the lock */
+    rb_nativethread_lock_initialize(&pjq->blocking.lock);
+
+    /* It's possible we have half-written jobs in the async buffer which will
+     * never get written. We need to iterate the buffer and mark any non-ready
+     * jobs as abandoned, so they will get skipped when we execute jobs. */
+    rb_atomic_t index = pjq->async.dequeue_index;
+    /* n.b. we _know_ there are no concurrent calls to flush, so original_job_count
+     * might go up but can never come down during this call */
+    rb_atomic_t original_combined = RUBY_ATOMIC_LOAD(pjq->async.enqueue_index_and_count);
+    rb_atomic_t original_job_count;
+    pjob_async_decompose_enqueue_index_and_count(original_combined, NULL, &original_job_count);
+    rb_atomic_t jobs_processed = 0;
+    while (original_job_count - jobs_processed > 0) {
+        rb_pjob_async_t *job = &pjq->async.ringbuf[index];
+        if (!(RUBY_ATOMIC_LOAD(job->flags) & PJOB_ASYNC_FLAG_READY)) {
+            /* n.b. if there is a thread running right now in register_postponed_job,
+             * this might wind up marking a job as abandoned that might actually
+             * subsequently get the ready flag. The only way such a thread could exist
+             * at the time the atfork handler is called is if it's created by an
+             * extension doing something like pthread_atfork; this seems like
+             * something that's not worth supporting. */
+            RUBY_ATOMIC_OR(job->flags, PJOB_ASYNC_FLAG_ABANDONED);
+        }
+        jobs_processed++;
+        pjob_async_increment_index_with_wrap(pjq, &index);
+    }
+    /* make sure we set the interrupt flag on _this_ thread if we carried any pjobs over
+     * from the other side of the fork */
+    if (original_job_count > 0) {
+        RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(get_valid_ec(vm));
+    }
+}
+
+
+/**
+ * Atomically claims a slot in the ringbuffer and increments the count, in a single CAS instruction
  */
+static inline bool
+pjob_async_next_free_index(rb_postponed_job_queues_t *pjq, rb_atomic_t *i)
+{
+    /* this load does need to be atomic because we can decide to exit the function because of it
+     * (because we might detect the ringbuf to be full) */
+    rb_atomic_t old_combined = RUBY_ATOMIC_LOAD(pjq->async.enqueue_index_and_count);
+    rb_atomic_t old_enqueue_index, old_count, new_enqueue_index, new_count, new_combined, cas_result;
+    while (true) {
+        pjob_async_decompose_enqueue_index_and_count(old_combined, &old_enqueue_index, &old_count);
+        new_count = old_count + 1;
+        new_enqueue_index = old_enqueue_index;
+        pjob_async_increment_index_with_wrap(pjq, &new_enqueue_index);
+
+        if (new_count > pjq->async.ringbuf_size) {
+            /* we are full */
+            return false;
+        }
+
+        new_combined = pjob_async_compose_enqueue_index_and_count(new_enqueue_index, new_count);
+        cas_result = RUBY_ATOMIC_CAS(pjq->async.enqueue_index_and_count, old_combined, new_combined);
+        if (cas_result == old_combined) {
+            break;
+        }
+        old_combined = cas_result;
+    }
+
+    *i = old_enqueue_index;
+    return true;
+}
+
+static int
+postponed_job_register_async_impl(rb_postponed_job_func_t func, void *data, rb_atomic_t flags)
+{
+    rb_vm_t *vm = GET_VM();
+    rb_postponed_job_queues_t *pjq = vm->postponed_job_queues;
+    rb_execution_context_t *ec = get_valid_ec(vm);
+
+    /* Find the next free index in the ringbuffer */
+    rb_atomic_t index;
+    if (!pjob_async_next_free_index(pjq, &index)) {
+        /* ringbuffer was full */
+        return 0;
+    }
+
+    /* write the job into the slot. Set the flags last, atomically, so that if a
+     * CPU can read (flags | PJOB_READY) as true, it is guaranteed to see the
+     * func/data arguments as well */
+    rb_pjob_async_t *job = &pjq->async.ringbuf[index];
+    /* annoyingly, this needs to be guaranteed to not tear because it could be read otherwise
+     * unsynchronized in register_one to see if the func is already in the buffer */
+    RUBY_ATOMIC_PTR_EXCHANGE(job->func, func);
+    job->data = data;
+    RUBY_ATOMIC_SET(job->flags, flags | PJOB_ASYNC_FLAG_READY);
+
+    /* mark the EC for interruption*/
+    RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
+
+    return 1;
+}
+
+ /*
+  * return 0 if job buffer is full
+  * Async-signal-safe
+  */
 int
 rb_postponed_job_register(unsigned int flags, rb_postponed_job_func_t func, void *data)
 {
-    rb_vm_t *vm = GET_VM();
-    rb_execution_context_t *ec = get_valid_ec(vm);
-
-  begin:
-    switch (postponed_job_register(ec, vm, flags, func, data, MAX_POSTPONED_JOB, vm->postponed_job_index)) {
-      case PJRR_SUCCESS    : return 1;
-      case PJRR_FULL       : return 0;
-      case PJRR_INTERRUPTED: goto begin;
-      default: rb_bug("unreachable");
-    }
+    /* Historically, rb_postponed_job_register took a flags argument, but nothing
+     * at all was ever done with it. This new implementation of postponed jobs
+     * actually has a need for some flags its implementation, but this isn't
+     * something which should be exposed to callers. So, the value of "flags" is
+     * isgnored, and we pass some actual flags to _impl. */
+    return postponed_job_register_async_impl(func, data, 0);
 }
 
 /*
@@ -1726,87 +1911,160 @@ rb_postponed_job_register(unsigned int flags, rb_postponed_job_func_t func, void
 int
 rb_postponed_job_register_one(unsigned int flags, rb_postponed_job_func_t func, void *data)
 {
-    rb_vm_t *vm = GET_VM();
-    rb_execution_context_t *ec = get_valid_ec(vm);
-    rb_postponed_job_t *pjob;
-    rb_atomic_t i, index;
+    /* Make a BEST EFFORT attempt to only register one copy of this job.
+     * We make the following guarantees with regards to calls to register_one:
+     *  - If multiple calls to rb_postponed_job_register_one happen-before a call
+     *    which checks vm_check_ints_blocking, we _do_ guarantee that it will only be
+     *    executed once. That happens via a racy check here first, but
+     *    rb_postponed_job_flush will actually enforce properly.
+     *  - If a call to rb_postponed_job_register_one happens during a call to
+     *    rb_postponed_job_flush, and there is already an instance of this job in the
+     *    queue, it will be called once during the ongoing call to
+     *    rb_postponed_job_flush, and possibly again during the _next_ call to
+     *    rb_postponed_job_flush.
+     */
+    rb_postponed_job_queues_t *pjq = GET_VM()->postponed_job_queues;
 
-  begin:
-    index = vm->postponed_job_index;
-    for (i=0; i<index; i++) {
-        pjob = &vm->postponed_job_buffer[i];
-        if (pjob->func == func) {
-            RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
+    rb_atomic_t original_enqueue_index_and_count, original_job_count, index, jobs_scanned;
+    original_enqueue_index_and_count = RUBY_ATOMIC_LOAD(pjq->async.enqueue_index_and_count);
+    pjob_async_decompose_enqueue_index_and_count(original_enqueue_index_and_count, &index, &original_job_count);
+    jobs_scanned = 0;
+    while (original_job_count - jobs_scanned > 0) {
+        pjob_async_decrement_index_with_wrap(pjq, &index);
+        rb_pjob_async_t *job = &pjq->async.ringbuf[index];
+        rb_atomic_t flags = RUBY_ATOMIC_LOAD(job->flags);
+        if (flags & PJOB_ASYNC_FLAG_READY && !(flags & PJOB_ASYNC_FLAG_ABANDONED)) {
+            /* we don't really need another memory fence here, but we _do_ need to make sure there's no tearing,
+             * and the RUBY_ATOMIC_ header only has seq_cst atomics. It's not worth making a whole new family of
+             * relaxed macros in atomic.h just for this */
+            rb_postponed_job_func_t scanned_func = (rb_postponed_job_func_t)RUBY_ATOMIC_PTR_LOAD(job->func);
+            if (scanned_func == func) {
+                return 2;
+            }
+        }
+        jobs_scanned++;
+    }
+
+    return postponed_job_register_async_impl(func, data, PJOB_ASYNC_FLAG_ONCE);
+}
+
+static int
+workqueue_do_insert_under_lock(struct st_table *table, rb_postponed_job_func_t func, void *data, bool once)
+{
+    if (once) {
+        if (st_lookup(table, (st_data_t)func, 0) != 0) {
             return 2;
         }
     }
-    switch (postponed_job_register(ec, vm, flags, func, data, MAX_POSTPONED_JOB + MAX_POSTPONED_JOB_SPECIAL_ADDITION, index)) {
-      case PJRR_SUCCESS    : return 1;
-      case PJRR_FULL       : return 0;
-      case PJRR_INTERRUPTED: goto begin;
-      default: rb_bug("unreachable");
-    }
+    /* make sure the allocation in st_add_direct doesn't recursively trigger GC under the lock */
+    bool was_gc_on = pjob_blocking_disable_gc();
+    /* use st_add_direct to make st_table work like a queue. This approach was
+     * originally committed by normalperson in 5a1dfb04, but had to be reverted as
+     * it is not suitable for use from signal handlers. It is suitable for use in
+     * blocking job registration, however. */
+    st_add_direct(table, (st_data_t)func, (st_data_t)data);
+    pjob_blocking_reenable_gc(was_gc_on);
+    return 1;
+}
+
+int
+rb_workqueue_register_impl(rb_postponed_job_func_t func, void *data, rb_atomic_t flags)
+{
+    rb_vm_t *vm = GET_VM();
+    rb_postponed_job_queues_t *pjq = GET_VM()->postponed_job_queues;
+    rb_execution_context_t *ec = get_valid_ec(vm);
+
+    rb_nativethread_lock_lock(&pjq->blocking.lock);
+    int ret = workqueue_do_insert_under_lock(pjq->blocking.table, func, data, flags);
+    RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
+    rb_nativethread_lock_unlock(&pjq->blocking.lock);
+    return ret;
 }
 
 /*
- * thread-safe and called from non-Ruby thread
- * returns FALSE on failure (ENOMEM), TRUE otherwise
+ * thread-safe and called from ruby or non-Ruby thread
+ * returns true always.
+ */
+
+int
+rb_workqueue_register(unsigned unused_flags, rb_postponed_job_func_t func, void *data)
+{
+    return rb_workqueue_register_impl(func, data, false);
+}
+
+/*
+ * thread-safe and called from ruby or non-Ruby thread
+ * returns true always.
  */
 int
-rb_workqueue_register(unsigned flags, rb_postponed_job_func_t func, void *data)
+rb_workqueue_register_one(unsigned unused_flags, rb_postponed_job_func_t func, void *data)
 {
-    struct rb_workqueue_job *wq_job = malloc(sizeof(*wq_job));
-    rb_vm_t *vm = GET_VM();
-
-    if (!wq_job) return FALSE;
-    wq_job->job.func = func;
-    wq_job->job.data = data;
-
-    rb_nativethread_lock_lock(&vm->workqueue_lock);
-    ccan_list_add_tail(&vm->workqueue, &wq_job->jnode);
-    rb_nativethread_lock_unlock(&vm->workqueue_lock);
-
-    // TODO: current implementation affects only main ractor
-    RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(rb_vm_main_ractor_ec(vm));
-
-    return TRUE;
+    return rb_workqueue_register_impl(func, data, true);
 }
 
 void
 rb_postponed_job_flush(rb_vm_t *vm)
 {
+    rb_postponed_job_queues_t *pjq = GET_VM()->postponed_job_queues;
     rb_execution_context_t *ec = GET_EC();
-    const rb_atomic_t block_mask = POSTPONED_JOB_INTERRUPT_MASK|TRAP_INTERRUPT_MASK;
+    const rb_atomic_t block_mask = POSTPONED_JOB_INTERRUPT_MASK | TRAP_INTERRUPT_MASK;
     volatile rb_atomic_t saved_mask = ec->interrupt_mask & block_mask;
     VALUE volatile saved_errno = ec->errinfo;
-    struct ccan_list_head tmp;
 
-    ccan_list_head_init(&tmp);
+    /* Take the blocking queue out from pjq, and replace it, so that we can freely
+    * iterate it & call the callbacks without having to hold the blocking lock */
+    struct st_table *blocking_table;
+    bool was_gc_on = pjob_blocking_disable_gc();
+    rb_nativethread_lock_lock(&pjq->blocking.lock);
+    blocking_table = pjq->blocking.table;
+    pjq->blocking.table = st_init_numtable();
+    rb_nativethread_lock_unlock(&pjq->blocking.lock);
+    pjob_blocking_reenable_gc(was_gc_on);
 
-    rb_nativethread_lock_lock(&vm->workqueue_lock);
-    ccan_list_append_list(&tmp, &vm->workqueue);
-    rb_nativethread_lock_unlock(&vm->workqueue_lock);
+    /* Drain the async job buffer into the blocking one */
+    rb_atomic_t index = pjq->async.dequeue_index;
+    rb_atomic_t original_enqueue_index_and_count = RUBY_ATOMIC_LOAD(pjq->async.enqueue_index_and_count);
+    rb_atomic_t original_job_count;
+    pjob_async_decompose_enqueue_index_and_count(original_enqueue_index_and_count, NULL, &original_job_count);
+    rb_atomic_t jobs_drained = 0;
+    while (original_job_count - jobs_drained > 0) {
+        rb_pjob_async_t *job = &pjq->async.ringbuf[index];
+        rb_atomic_t flags = RUBY_ATOMIC_EXCHANGE(job->flags, 0);
+        /* If we have seen a job which is not marked as ready, that means some other
+         * thread is in the process of writing the job data; we need to abort early
+         * here because it is not guaranteed that job->func/job->data will be
+         * meaningful */
+        if (!(flags & PJOB_ASYNC_FLAG_READY)) {
+            break;
+        }
+        if (!(flags & PJOB_ASYNC_FLAG_ABANDONED)) {
+            /* copy the job at index into the blocking buffer */
+            workqueue_do_insert_under_lock(blocking_table, job->func, job->data, flags & PJOB_ASYNC_FLAG_ONCE);
+        }
+        jobs_drained++;
+        pjob_async_increment_index_with_wrap(pjq, &index);
+    }
+    /* non-atomic; dequeue_index is only read non-concurrently from this function. */
+    pjq->async.dequeue_index = index;
+    /* This subtraction will allow more jobs to be enqueued */
+    rb_atomic_t previous_job_count = pjob_async_count_subtract(pjq, jobs_drained);
+    if (previous_job_count - jobs_drained > 0) {
+        /* Make sure we come back around if there are still jobs to be drained */
+        RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
+    }
 
+    /* We're now free to iterate & execute the jobs from the blocking table */
     ec->errinfo = Qnil;
     /* mask POSTPONED_JOB dispatch */
     ec->interrupt_mask |= block_mask;
     {
         EC_PUSH_TAG(ec);
         if (EC_EXEC_TAG() == TAG_NONE) {
-            rb_atomic_t index;
-            struct rb_workqueue_job *wq_job;
-
-            while ((index = vm->postponed_job_index) > 0) {
-                if (ATOMIC_CAS(vm->postponed_job_index, index, index-1) == index) {
-                    rb_postponed_job_t *pjob = &vm->postponed_job_buffer[index-1];
-                    (*pjob->func)(pjob->data);
-                }
-            }
-            while ((wq_job = ccan_list_pop(&tmp, struct rb_workqueue_job, jnode))) {
-                rb_postponed_job_t pjob = wq_job->job;
-
-                free(wq_job);
-                (pjob.func)(pjob.data);
+            st_data_t k, v;
+            while (st_shift(blocking_table, &k, &v)) {
+                rb_postponed_job_func_t func = (rb_postponed_job_func_t)k;
+                void *data = (void *)v;
+                func(data);
             }
         }
         EC_POP_TAG();
@@ -1815,12 +2073,20 @@ rb_postponed_job_flush(rb_vm_t *vm)
     ec->interrupt_mask &= ~(saved_mask ^ block_mask);
     ec->errinfo = saved_errno;
 
-    /* don't leak memory if a job threw an exception */
-    if (!ccan_list_empty(&tmp)) {
-        rb_nativethread_lock_lock(&vm->workqueue_lock);
-        ccan_list_prepend_list(&vm->workqueue, &tmp);
-        rb_nativethread_lock_unlock(&vm->workqueue_lock);
-
-        RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(GET_EC());
+    /* Historically, the thing which was done if a job threw an exception was to
+     * keep the remaining jobs in the queue to execute next time. So, add any
+     * remaining entries from our execution list back into the new blocking job
+     * table */
+    if (st_table_size(blocking_table) > 0) {
+        rb_nativethread_lock_lock(&pjq->blocking.lock);
+        st_data_t k, v;
+        while (st_shift(blocking_table, &k, &v)) {
+            rb_postponed_job_func_t func = (rb_postponed_job_func_t)k;
+            void *data = (void *)v;
+            workqueue_do_insert_under_lock(pjq->blocking.table, func, data, 0);
+        }
+        rb_nativethread_lock_unlock(&pjq->blocking.lock);
+        RUBY_VM_SET_POSTPONED_JOB_INTERRUPT(ec);
     }
+    st_free_table(blocking_table);
 }
