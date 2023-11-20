@@ -1825,6 +1825,16 @@ rb_vm_postponed_job_atfork(void)
     }
 }
 
+/* Frees the memory managed by the postponed job infrastructure at shutdown */
+void
+rb_vm_postponed_job_free(void)
+{
+    rb_vm_t *vm = GET_VM();
+    rb_nativethread_lock_destroy(&vm->postponed_job_queues->blocking.lock);
+    st_free_table(vm->postponed_job_queues->blocking.table);
+    ruby_xfree(vm->postponed_job_queues);
+    vm->postponed_job_queues = NULL;
+}
 
 /**
  * Atomically claims a slot in the ringbuffer and increments the count, in a single CAS instruction

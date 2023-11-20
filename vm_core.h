@@ -2166,6 +2166,7 @@ rb_exec_event_hook_script_compiled(rb_execution_context_t *ec, const rb_iseq_t *
 
 void rb_vm_trap_exit(rb_vm_t *vm);
 void rb_vm_postponed_job_atfork(void); /* vm_trace.c */
+void rb_vm_postponed_job_free(void); /* vm_trace.c */
 
 /* Documenting these here with full doc comments, so we can easily move them into
  * the public debub.h header if we decide to expose them. */
