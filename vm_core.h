@@ -98,6 +98,7 @@ extern int ruby_assert_critical_section_entered;
 #include "internal/vm.h"
 #include "method.h"
 #include "node.h"
+#include "ruby/debug.h"
 #include "ruby/ruby.h"
 #include "ruby/st.h"
 #include "ruby_atomic.h"
@@ -2165,6 +2166,47 @@ rb_exec_event_hook_script_compiled(rb_execution_context_t *ec, const rb_iseq_t *
 
 void rb_vm_trap_exit(rb_vm_t *vm);
 void rb_vm_postponed_job_atfork(void); /* vm_trace.c */
+
+/* Documenting these here with full doc comments, so we can easily move them into
+ * the public debub.h header if we decide to expose them. */
+
+
+/**
+ * Registers a deferred job to run later, with the GVL.
+ *
+ * There are situations when running a ruby program is not possible. For instance,
+ * when the GC is busy, or from a thread not holding the GVL. This function allows
+ * queueing a callback to run later, from a thread with the GVL and in a context
+ * where allocations are allowed.
+ *
+ * This function is guaranteed to succeed. In order to provide that guarantee, it
+ * may block briefly while acquiring a mutex, and allocate memory (on the C heap).
+ *
+ * This function is safe to call from any thread, with or without the GVL, even
+ * threads completely unknown to Ruby. However, this function is NOT ok to call
+ * from a (C-level) signal handler, since it can allocate and block.
+ *
+ * @param[in]      flags      (Unused) reserved for future extensions.
+ * @param[in]      func       Job body.
+ * @param[in,out]  data       Passed as-is to `func`.
+ * @return         Always returns 1
+ * @post           The passed job queued for execution.
+ */
+int rb_workqueue_register(unsigned int flags, rb_postponed_job_func_t func, void *data);
+
+/**
+ * Identical to rb_workqueue_register(), except  it additionally checks for
+ * duplicated registration. If `func` is already queued for execution, (even
+ * with different data), this function does nothing.
+ *
+ * @param[in]      flags      (Unused) reserved for future extensions.
+ * @param[in]      func       Job body.
+ * @param[in,out]  data       Passed as-is to `func`.
+ * @retval         1          Passed function was enqueued for execution
+ * @retval         2          Passed function was already enqueued for execution
+ * @post           One copy of the passed job queued for execution.
+ */
+int rb_workqueue_register_one(unsigned int flags, rb_postponed_job_func_t func, void *data);
 
 RUBY_SYMBOL_EXPORT_BEGIN
 

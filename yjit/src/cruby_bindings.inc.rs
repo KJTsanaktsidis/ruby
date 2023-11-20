@@ -961,6 +961,12 @@ extern "C" {
         klass: VALUE,
         id: ID,
     ) -> *const rb_callable_method_entry_t;
+    pub fn rb_profile_frames(
+        start: ::std::os::raw::c_int,
+        limit: ::std::os::raw::c_int,
+        buff: *mut VALUE,
+        lines: *mut ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int;
     pub static mut rb_mRubyVMFrozenCore: VALUE;
     pub static mut rb_block_param_proxy: VALUE;
     pub fn rb_vm_ep_local_ep(ep: *const VALUE) -> *const VALUE;
@@ -1006,12 +1012,6 @@ extern "C" {
     pub fn rb_iseqw_to_iseq(iseqw: VALUE) -> *const rb_iseq_t;
     pub fn rb_iseq_label(iseq: *const rb_iseq_t) -> VALUE;
     pub fn rb_vm_barrier();
-    pub fn rb_profile_frames(
-        start: ::std::os::raw::c_int,
-        limit: ::std::os::raw::c_int,
-        buff: *mut VALUE,
-        lines: *mut ::std::os::raw::c_int,
-    ) -> ::std::os::raw::c_int;
     pub fn rb_jit_cont_each_iseq(callback: rb_iseq_callback, data: *mut ::std::os::raw::c_void);
     pub fn rb_yjit_mark_writable(mem_block: *mut ::std::os::raw::c_void, mem_size: u32) -> bool;
     pub fn rb_yjit_mark_executable(mem_block: *mut ::std::os::raw::c_void, mem_size: u32);

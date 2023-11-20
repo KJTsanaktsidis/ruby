@@ -211,6 +211,7 @@ objspace.o: $(hdrdir)/ruby/backward/2/limits.h
 objspace.o: $(hdrdir)/ruby/backward/2/long_long.h
 objspace.o: $(hdrdir)/ruby/backward/2/stdalign.h
 objspace.o: $(hdrdir)/ruby/backward/2/stdarg.h
+objspace.o: $(hdrdir)/ruby/debug.h
 objspace.o: $(hdrdir)/ruby/defines.h
 objspace.o: $(hdrdir)/ruby/encoding.h
 objspace.o: $(hdrdir)/ruby/intern.h

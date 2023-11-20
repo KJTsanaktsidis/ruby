@@ -4506,9 +4506,7 @@ gc_finalize_deferred(void *dmy)
 static void
 gc_finalize_deferred_register(rb_objspace_t *objspace)
 {
-    if (rb_postponed_job_register_one(0, gc_finalize_deferred, objspace) == 0) {
-        rb_bug("gc_finalize_deferred_register: can't register finalizer.");
-    }
+    rb_workqueue_register_one(0, gc_finalize_deferred, objspace);
 }
 
 struct force_finalize_list {

@@ -404,6 +404,7 @@ ripper.o: $(hdrdir)/ruby/backward/2/limits.h
 ripper.o: $(hdrdir)/ruby/backward/2/long_long.h
 ripper.o: $(hdrdir)/ruby/backward/2/stdalign.h
 ripper.o: $(hdrdir)/ruby/backward/2/stdarg.h
+ripper.o: $(hdrdir)/ruby/debug.h
 ripper.o: $(hdrdir)/ruby/defines.h
 ripper.o: $(hdrdir)/ruby/encoding.h
 ripper.o: $(hdrdir)/ruby/intern.h

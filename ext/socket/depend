@@ -24,6 +24,7 @@ ancdata.o: $(hdrdir)/ruby/backward/2/limits.h
 ancdata.o: $(hdrdir)/ruby/backward/2/long_long.h
 ancdata.o: $(hdrdir)/ruby/backward/2/stdalign.h
 ancdata.o: $(hdrdir)/ruby/backward/2/stdarg.h
+ancdata.o: $(hdrdir)/ruby/debug.h
 ancdata.o: $(hdrdir)/ruby/defines.h
 ancdata.o: $(hdrdir)/ruby/encoding.h
 ancdata.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -232,6 +233,7 @@ basicsocket.o: $(hdrdir)/ruby/backward/2/limits.h
 basicsocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 basicsocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 basicsocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+basicsocket.o: $(hdrdir)/ruby/debug.h
 basicsocket.o: $(hdrdir)/ruby/defines.h
 basicsocket.o: $(hdrdir)/ruby/encoding.h
 basicsocket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -440,6 +442,7 @@ constants.o: $(hdrdir)/ruby/backward/2/limits.h
 constants.o: $(hdrdir)/ruby/backward/2/long_long.h
 constants.o: $(hdrdir)/ruby/backward/2/stdalign.h
 constants.o: $(hdrdir)/ruby/backward/2/stdarg.h
+constants.o: $(hdrdir)/ruby/debug.h
 constants.o: $(hdrdir)/ruby/defines.h
 constants.o: $(hdrdir)/ruby/encoding.h
 constants.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -649,6 +652,7 @@ ifaddr.o: $(hdrdir)/ruby/backward/2/limits.h
 ifaddr.o: $(hdrdir)/ruby/backward/2/long_long.h
 ifaddr.o: $(hdrdir)/ruby/backward/2/stdalign.h
 ifaddr.o: $(hdrdir)/ruby/backward/2/stdarg.h
+ifaddr.o: $(hdrdir)/ruby/debug.h
 ifaddr.o: $(hdrdir)/ruby/defines.h
 ifaddr.o: $(hdrdir)/ruby/encoding.h
 ifaddr.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -857,6 +861,7 @@ init.o: $(hdrdir)/ruby/backward/2/limits.h
 init.o: $(hdrdir)/ruby/backward/2/long_long.h
 init.o: $(hdrdir)/ruby/backward/2/stdalign.h
 init.o: $(hdrdir)/ruby/backward/2/stdarg.h
+init.o: $(hdrdir)/ruby/debug.h
 init.o: $(hdrdir)/ruby/defines.h
 init.o: $(hdrdir)/ruby/encoding.h
 init.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -1065,6 +1070,7 @@ ipsocket.o: $(hdrdir)/ruby/backward/2/limits.h
 ipsocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 ipsocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 ipsocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+ipsocket.o: $(hdrdir)/ruby/debug.h
 ipsocket.o: $(hdrdir)/ruby/defines.h
 ipsocket.o: $(hdrdir)/ruby/encoding.h
 ipsocket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -1273,6 +1279,7 @@ option.o: $(hdrdir)/ruby/backward/2/limits.h
 option.o: $(hdrdir)/ruby/backward/2/long_long.h
 option.o: $(hdrdir)/ruby/backward/2/stdalign.h
 option.o: $(hdrdir)/ruby/backward/2/stdarg.h
+option.o: $(hdrdir)/ruby/debug.h
 option.o: $(hdrdir)/ruby/defines.h
 option.o: $(hdrdir)/ruby/encoding.h
 option.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -1481,6 +1488,7 @@ raddrinfo.o: $(hdrdir)/ruby/backward/2/limits.h
 raddrinfo.o: $(hdrdir)/ruby/backward/2/long_long.h
 raddrinfo.o: $(hdrdir)/ruby/backward/2/stdalign.h
 raddrinfo.o: $(hdrdir)/ruby/backward/2/stdarg.h
+raddrinfo.o: $(hdrdir)/ruby/debug.h
 raddrinfo.o: $(hdrdir)/ruby/defines.h
 raddrinfo.o: $(hdrdir)/ruby/encoding.h
 raddrinfo.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -1689,6 +1697,7 @@ socket.o: $(hdrdir)/ruby/backward/2/limits.h
 socket.o: $(hdrdir)/ruby/backward/2/long_long.h
 socket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 socket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+socket.o: $(hdrdir)/ruby/debug.h
 socket.o: $(hdrdir)/ruby/defines.h
 socket.o: $(hdrdir)/ruby/encoding.h
 socket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -1897,6 +1906,7 @@ sockssocket.o: $(hdrdir)/ruby/backward/2/limits.h
 sockssocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 sockssocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 sockssocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+sockssocket.o: $(hdrdir)/ruby/debug.h
 sockssocket.o: $(hdrdir)/ruby/defines.h
 sockssocket.o: $(hdrdir)/ruby/encoding.h
 sockssocket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -2105,6 +2115,7 @@ tcpserver.o: $(hdrdir)/ruby/backward/2/limits.h
 tcpserver.o: $(hdrdir)/ruby/backward/2/long_long.h
 tcpserver.o: $(hdrdir)/ruby/backward/2/stdalign.h
 tcpserver.o: $(hdrdir)/ruby/backward/2/stdarg.h
+tcpserver.o: $(hdrdir)/ruby/debug.h
 tcpserver.o: $(hdrdir)/ruby/defines.h
 tcpserver.o: $(hdrdir)/ruby/encoding.h
 tcpserver.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -2313,6 +2324,7 @@ tcpsocket.o: $(hdrdir)/ruby/backward/2/limits.h
 tcpsocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 tcpsocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 tcpsocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+tcpsocket.o: $(hdrdir)/ruby/debug.h
 tcpsocket.o: $(hdrdir)/ruby/defines.h
 tcpsocket.o: $(hdrdir)/ruby/encoding.h
 tcpsocket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -2521,6 +2533,7 @@ udpsocket.o: $(hdrdir)/ruby/backward/2/limits.h
 udpsocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 udpsocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 udpsocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+udpsocket.o: $(hdrdir)/ruby/debug.h
 udpsocket.o: $(hdrdir)/ruby/defines.h
 udpsocket.o: $(hdrdir)/ruby/encoding.h
 udpsocket.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -2729,6 +2742,7 @@ unixserver.o: $(hdrdir)/ruby/backward/2/limits.h
 unixserver.o: $(hdrdir)/ruby/backward/2/long_long.h
 unixserver.o: $(hdrdir)/ruby/backward/2/stdalign.h
 unixserver.o: $(hdrdir)/ruby/backward/2/stdarg.h
+unixserver.o: $(hdrdir)/ruby/debug.h
 unixserver.o: $(hdrdir)/ruby/defines.h
 unixserver.o: $(hdrdir)/ruby/encoding.h
 unixserver.o: $(hdrdir)/ruby/fiber/scheduler.h
@@ -2937,6 +2951,7 @@ unixsocket.o: $(hdrdir)/ruby/backward/2/limits.h
 unixsocket.o: $(hdrdir)/ruby/backward/2/long_long.h
 unixsocket.o: $(hdrdir)/ruby/backward/2/stdalign.h
 unixsocket.o: $(hdrdir)/ruby/backward/2/stdarg.h
+unixsocket.o: $(hdrdir)/ruby/debug.h
 unixsocket.o: $(hdrdir)/ruby/defines.h
 unixsocket.o: $(hdrdir)/ruby/encoding.h
 unixsocket.o: $(hdrdir)/ruby/fiber/scheduler.h

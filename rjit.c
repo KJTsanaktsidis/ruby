@@ -216,8 +216,6 @@ rjit_cme_invalidate(void *data)
     });
 }
 
-extern int rb_workqueue_register(unsigned flags, rb_postponed_job_func_t func, void *data);
-
 void
 rb_rjit_cme_invalidate(rb_callable_method_entry_t *cme)
 {
@@ -301,7 +299,7 @@ rb_rjit_iseq_update_references(struct rb_iseq_constant_body *const body)
     // Asynchronously hook the Ruby code to avoid allocation during GC.compact.
     // Using _one because it's too slow to invalidate all for each ISEQ. Thus
     // not giving an ISEQ pointer.
-    rb_postponed_job_register_one(0, rjit_iseq_update_references, NULL);
+    rb_workqueue_register_one(0, rjit_iseq_update_references, NULL);
 }
 
 void
