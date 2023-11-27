@@ -438,8 +438,9 @@ class TestGCCompact < Test::Unit::TestCase
       ary.each { |h| h[:i] = 9 }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      puts stats.inspect
 
-      assert_operator(stats[:moved_down][:T_HASH], :>=, 500)
+      assert_operator(stats[:moved_down][:T_HASH], :>=, HASH_COUNT)
     end;
   end
 
