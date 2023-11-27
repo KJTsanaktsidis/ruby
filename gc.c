@@ -930,6 +930,7 @@ typedef struct rb_objspace {
 
     struct {
         size_t considered_count_table[T_MASK];
+        size_t pinned_count_table[T_MASK];
         size_t moved_count_table[T_MASK];
         size_t moved_up_count_table[T_MASK];
         size_t moved_down_count_table[T_MASK];
@@ -6155,6 +6156,7 @@ gc_compact_start(rb_objspace_t *objspace)
     }
 
     memset(objspace->rcompactor.considered_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.pinned_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_up_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_down_count_table, 0, T_MASK * sizeof(size_t));
@@ -7013,6 +7015,7 @@ gc_pin(rb_objspace_t *objspace, VALUE obj)
             if (!MARKED_IN_BITMAP(GET_HEAP_PINNED_BITS(obj), obj)) {
                 GET_HEAP_PAGE(obj)->pinned_slots++;
                 MARK_IN_BITMAP(GET_HEAP_PINNED_BITS(obj), obj);
+                objspace->rcompactor.pinned_count_table[BUILTIN_TYPE(obj)]++;
             }
         }
     }
@@ -10916,6 +10919,7 @@ gc_compact_stats(VALUE self)
     rb_objspace_t *objspace = &rb_objspace;
     VALUE h = rb_hash_new();
     VALUE considered = rb_hash_new();
+    VALUE pinned = rb_hash_new();
     VALUE moved = rb_hash_new();
     VALUE moved_up = rb_hash_new();
     VALUE moved_down = rb_hash_new();
@@ -10923,6 +10927,10 @@ gc_compact_stats(VALUE self)
     for (i=0; i<T_MASK; i++) {
         if (objspace->rcompactor.considered_count_table[i]) {
             rb_hash_aset(considered, type_sym(i), SIZET2NUM(objspace->rcompactor.considered_count_table[i]));
+        }
+
+        if (objspace->rcompactor.pinned_count_table[i]) {
+            rb_hash_aset(pinned, type_sym(i), SIZET2NUM(objspace->rcompactor.pinned_count_table[i]));
         }
 
         if (objspace->rcompactor.moved_count_table[i]) {
@@ -10939,6 +10947,7 @@ gc_compact_stats(VALUE self)
     }
 
     rb_hash_aset(h, ID2SYM(rb_intern("considered")), considered);
+    rb_hash_aset(h, ID2SYM(rb_intern("pinned")), pinned);
     rb_hash_aset(h, ID2SYM(rb_intern("moved")), moved);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_up")), moved_up);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_down")), moved_down);

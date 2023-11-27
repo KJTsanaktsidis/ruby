@@ -323,7 +323,9 @@ class TestGCCompact < Test::Unit::TestCase
       end
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
-      assert_operator(stats.dig(:moved_down, :T_ARRAY) || 0, :>=, ARY_COUNT)
+      moved = stats[:moved_down].fetch(:T_ARRAY, 0)
+      pinned = stats[:pinned].fetch(:T_ARRAY, 0)
+      assert_operator(moved + pinned, :>=, ARY_COUNT)
       refute_empty(arys.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
@@ -345,14 +347,15 @@ class TestGCCompact < Test::Unit::TestCase
       end
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
-      assert_operator(stats.dig(:moved_up, :T_ARRAY) || 0, :>=, ARY_COUNT)
+      moved = stats[:moved_up].fetch(:T_ARRAY, 0)
+      pinned = stats[:pinned].fetch(:T_ARRAY, 0)
+      assert_operator(moved + pinned, :>=, ARY_COUNT)
       refute_empty(arys.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
 
   def test_moving_objects_between_size_pools
     omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
-    omit "Flaky on Solaris" if /solaris/i =~ RUBY_PLATFORM
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10, signal: :SEGV)
     begin;
@@ -375,8 +378,10 @@ class TestGCCompact < Test::Unit::TestCase
       Foo.new.add_ivars
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      moved = stats[:moved_up].fetch(:T_OBJECT, 0)
+      pinned = stats[:pinned].fetch(:T_OBJECT, 0)
 
-      assert_operator(stats.dig(:moved_up, :T_OBJECT) || 0, :>=, OBJ_COUNT)
+      assert_operator(moved + pinned, :>=, OBJ_COUNT)
       refute_empty(ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
@@ -394,8 +399,10 @@ class TestGCCompact < Test::Unit::TestCase
       ary = STR_COUNT.times.map { "" << str }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      moved = stats[:moved_up].fetch(:T_STRING, 0)
+      pinned = stats[:pinned].fetch(:T_STRING, 0)
 
-      assert_operator(stats[:moved_up][:T_STRING], :>=, STR_COUNT)
+      assert_operator(moved + pinned, :>=, STR_COUNT)
       refute_empty(ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
@@ -412,8 +419,10 @@ class TestGCCompact < Test::Unit::TestCase
       ary = STR_COUNT.times.map { ("a" * GC::INTERNAL_CONSTANTS[:BASE_SLOT_SIZE]).squeeze! }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      moved = stats[:moved_down].fetch(:T_STRING, 0)
+      pinned = stats[:pinned].fetch(:T_STRING, 0)
 
-      assert_operator(stats[:moved_down][:T_STRING], :>=, STR_COUNT)
+      assert_operator(moved + pinned, :>=, STR_COUNT)
       refute_empty(ary.keep_if { |o| ObjectSpace.dump(o).include?('"embedded":true') })
     end;
   end
@@ -422,10 +431,6 @@ class TestGCCompact < Test::Unit::TestCase
     omit if GC::INTERNAL_CONSTANTS[:SIZE_POOL_COUNT] == 1
     # AR and ST hashes are in the same size pool on 32 bit
     omit unless RbConfig::SIZEOF["uint64_t"] <= RbConfig::SIZEOF["void*"]
-    # This test fails on Solaris SPARC with the following error and I can't figure out why:
-    #   TestGCCompact#test_moving_hashes_down_size_pools
-    #   Expected 499 to be >= 500.
-    omit if /sparc-solaris/ =~ RUBY_PLATFORM
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10, signal: :SEGV)
     begin;
@@ -438,8 +443,10 @@ class TestGCCompact < Test::Unit::TestCase
       ary.each { |h| h[:i] = 9 }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
+      moved = stats[:moved_down].fetch(:T_HASH, 0)
+      pinned = stats[:pinned].fetch(:T_HASH, 0)
 
-      assert_operator(stats[:moved_down][:T_HASH], :>=, 500)
+      assert_operator(moved + pinned, :>=, HASH_COUNT)
     end;
   end
 
