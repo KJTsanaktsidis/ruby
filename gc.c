@@ -8577,7 +8577,6 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
     short slot_bits = slot_size / BASE_SLOT_SIZE;
     GC_ASSERT(slot_bits > 0);
 
-    fprintf(stdout, "compacting plane 0x%lx\n", p);
     do {
         VALUE vp = (VALUE)p;
         GC_ASSERT(vp % sizeof(RVALUE) == 0);
@@ -8622,6 +8621,7 @@ gc_compact_page(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *h
     bitset = (mark_bits[0] & ~pin_bits[0]);
     bitset >>= NUM_IN_PAGE(p);
     if (bitset) {
+        fprintf(stdout, "compacting first plane 0x%lx\n", p);
         if (!gc_compact_plane(objspace, size_pool, heap, (uintptr_t)p, bitset, page))
             return false;
     }
@@ -8630,6 +8630,7 @@ gc_compact_page(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *h
     for (int j = 1; j < HEAP_PAGE_BITMAP_LIMIT; j++) {
         bitset = (mark_bits[j] & ~pin_bits[j]);
         if (bitset) {
+            fprintf(stdout, "compacting plane 0x%lx\n", p);
             if (!gc_compact_plane(objspace, size_pool, heap, (uintptr_t)p, bitset, page))
                 return false;
         }
