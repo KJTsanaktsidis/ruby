@@ -429,6 +429,7 @@ class TestGCCompact < Test::Unit::TestCase
 
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10, signal: :SEGV)
     begin;
+      $stdout.sync = true
       HASH_COUNT = 10
 
       GC.verify_compaction_references(expand_heap: true, toward: :empty)
