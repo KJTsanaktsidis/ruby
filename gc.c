@@ -938,6 +938,10 @@ typedef struct rb_objspace {
 
         /* This function will be used, if set, to sort the heap prior to compaction */
         gc_compact_compare_func compare_func;
+        /* Control what order we compact size pools in */
+        int compact_direction;
+        /* If set, add to the existing stats counters, don't reset them */
+        bool keep_stats;
     } rcompactor;
 
     struct {
@@ -6181,11 +6185,14 @@ gc_compact_start(rb_objspace_t *objspace)
         record->moved_objects = objspace->rcompactor.total_moved;
     }
 
+    if (!objspace->rcompactor.keep_stats) {
+        memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
+        memset(objspace->rcompactor.moved_up_count_table, 0, T_MASK * sizeof(size_t));
+        memset(objspace->rcompactor.moved_down_count_table, 0, T_MASK * sizeof(size_t));
+    }
+    /* These should be zeroed even if keep_stats is set; they count objects, not actions */
     memset(objspace->rcompactor.considered_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.pinned_count_table, 0, T_MASK * sizeof(size_t));
-    memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
-    memset(objspace->rcompactor.moved_up_count_table, 0, T_MASK * sizeof(size_t));
-    memset(objspace->rcompactor.moved_down_count_table, 0, T_MASK * sizeof(size_t));
 
     /* Set up read barrier for pages containing MOVED objects */
     install_handlers();
@@ -8688,25 +8695,36 @@ gc_sweep_compact(rb_objspace_t *objspace)
 
     while (!gc_compact_all_compacted_p(objspace)) {
         for (int i = 0; i < SIZE_POOL_COUNT; i++) {
-            rb_size_pool_t *size_pool = &size_pools[i];
+            rb_size_pool_t *size_pool;
+            /* Compactor direction:
+             *   1: fully compact one pool at a time, smallest -> largest size pool
+             *   0: compact each size pool one page at a time
+             *  -1: fully compact one pool at a time, largest -> smallest size pool
+             */
+            if (objspace->rcompactor.compact_direction == -1) {
+                size_pool = &size_pools[SIZE_POOL_COUNT - i - 1];
+            } else {
+                size_pool = &size_pools[i];
+            }
             rb_heap_t *heap = SIZE_POOL_EDEN_HEAP(size_pool);
 
-            if (gc_compact_heap_cursors_met_p(heap)) {
-                continue;
-            }
+            while (!gc_compact_heap_cursors_met_p(heap)) {
+                struct heap_page *start_page = heap->compact_cursor;
 
-            struct heap_page *start_page = heap->compact_cursor;
+                if (!gc_compact_page(objspace, size_pool, heap, start_page)) {
+                    lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
+                    break;
+                }
 
-            if (!gc_compact_page(objspace, size_pool, heap, start_page)) {
+                // If we get here, we've finished moving all objects on the compact_cursor page
+                // So we can lock it and move the cursor on to the next one.
                 lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
+                heap->compact_cursor = ccan_list_prev(&heap->pages, heap->compact_cursor, page_node);
 
-                continue;
+                if (objspace->rcompactor.compact_direction == 0) {
+                    break;
+                }
             }
-
-            // If we get here, we've finished moving all objects on the compact_cursor page
-            // So we can lock it and move the cursor on to the next one.
-            lock_page_body(objspace, GET_PAGE_BODY(start_page->start));
-            heap->compact_cursor = ccan_list_prev(&heap->pages, heap->compact_cursor, page_node);
         }
     }
 
@@ -11063,6 +11081,39 @@ gc_compact(VALUE self)
 #endif
 
 #if GC_CAN_COMPILE_COMPACTION
+
+struct desired_compaction_pages_i_data {
+    rb_objspace_t *objspace;
+    size_t required_slots[SIZE_POOL_COUNT];
+};
+
+static int
+desired_compaction_pages_i(struct heap_page *page, void *data)
+{
+    struct desired_compaction_pages_i_data *tdata = data;
+    rb_objspace_t *objspace = tdata->objspace;
+    VALUE vstart = (VALUE)page->start;
+    VALUE vend = vstart + (VALUE)(page->total_slots * page->size_pool->slot_size);
+
+
+    for (VALUE v = vstart; v != vend; v += page->size_pool->slot_size) {
+        void *poisoned = asan_unpoison_object_temporary(v);
+
+        rb_size_pool_t *dest_pool = gc_compact_destination_pool(objspace, page->size_pool, v);
+        if (dest_pool != page->size_pool) {
+            size_t dest_pool_idx = dest_pool - size_pools;
+            tdata->required_slots[dest_pool_idx]++;
+        }
+
+        if (poisoned) {
+            GC_ASSERT(BUILTIN_TYPE(v) == T_NONE);
+            asan_poison_object(v);
+        }
+    }
+
+    return 0;
+}
+
 static VALUE
 gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE double_heap, VALUE expand_heap, VALUE toward_empty)
 {
@@ -11081,16 +11132,26 @@ gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE do
 
         /* if both double_heap and expand_heap are set, expand_heap takes precedence */
         if (RTEST(double_heap) || RTEST(expand_heap)) {
+            struct desired_compaction_pages_i_data desired_compaction = {
+                .objspace = objspace,
+                .required_slots = {0},
+            };
+            if (RTEST(expand_heap)) {
+                objspace_each_pages(objspace, desired_compaction_pages_i, &desired_compaction, TRUE);
+            }
+
             for (int i = 0; i < SIZE_POOL_COUNT; i++) {
                 rb_size_pool_t *size_pool = &size_pools[i];
                 rb_heap_t *heap = SIZE_POOL_EDEN_HEAP(size_pool);
 
                 size_t minimum_pages = 0;
+                size_t required_pages_to_fit = 0;
                 if (RTEST(expand_heap)) {
                     minimum_pages = minimum_pages_for_size_pool(objspace, size_pool);
+                    required_pages_to_fit = slots_to_pages_for_size_pool(objspace, size_pool, desired_compaction.required_slots[i]);
                 }
-
-                heap_add_pages(objspace, size_pool, heap, MAX(minimum_pages, heap->total_pages));
+                size_t pages_to_add = MAX(heap->total_pages, MAX(minimum_pages, required_pages_to_fit));
+                heap_add_pages(objspace, size_pool, heap, pages_to_add);
             }
         }
 
@@ -11100,7 +11161,14 @@ gc_verify_compaction_references(rb_execution_context_t *ec, VALUE self, VALUE do
     }
     RB_VM_LOCK_LEAVE();
 
+    objspace->rcompactor.compact_direction = 1;
     gc_start_internal(NULL, self, Qtrue, Qtrue, Qtrue, Qtrue);
+    objspace->rcompactor.compact_direction = -1;
+    /* sum up moved object counts between the forward & reverse compaction runs */
+    objspace->rcompactor.keep_stats = true;
+    gc_start_internal(NULL, self, Qtrue, Qtrue, Qtrue, Qtrue);
+    objspace->rcompactor.compact_direction = 0;
+    objspace->rcompactor.keep_stats = false;
 
     objspace_reachable_objects_from_root(objspace, root_obj_check_moved_i, NULL);
     objspace_each_objects(objspace, heap_check_moved_i, NULL, TRUE);
