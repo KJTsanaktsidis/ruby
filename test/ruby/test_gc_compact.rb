@@ -435,7 +435,7 @@ class TestGCCompact < Test::Unit::TestCase
 
       base_hash = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 }
       ary = HASH_COUNT.times.map { base_hash.dup }
-      puts "Hash OBJ IDs: #{ary.map(&:object_id)}"
+      puts("Hash OBJ IDs: " + ary.map(&:object_id))
       ary.each { |h| h[:i] = 9 }
 
       stats = GC.verify_compaction_references(expand_heap: true, toward: :empty)
