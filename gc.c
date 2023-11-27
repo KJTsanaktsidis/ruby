@@ -930,6 +930,9 @@ typedef struct rb_objspace {
 
     struct {
         size_t considered_count_table[T_MASK];
+        size_t pinned_count_table[T_MASK];
+        size_t gc_compact_move_failed_count_table[T_MASK];
+        size_t cursors_met_count_table[T_MASK];
         size_t moved_count_table[T_MASK];
         size_t moved_up_count_table[T_MASK];
         size_t moved_down_count_table[T_MASK];
@@ -6125,6 +6128,9 @@ gc_compact_start(rb_objspace_t *objspace)
     }
 
     memset(objspace->rcompactor.considered_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.pinned_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.gc_compact_move_failed_count_table, 0, T_MASK * sizeof(size_t));
+    memset(objspace->rcompactor.cursors_met_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_up_count_table, 0, T_MASK * sizeof(size_t));
     memset(objspace->rcompactor.moved_down_count_table, 0, T_MASK * sizeof(size_t));
@@ -8511,6 +8517,7 @@ gc_compact_move(rb_objspace_t *objspace, rb_heap_t *heap, rb_size_pool_t *size_p
     rb_shape_t *orig_shape = NULL;
 
     if (gc_compact_heap_cursors_met_p(dheap)) {
+        objspace->rcompactor.cursors_met_count_table[BUILTIN_TYPE(src)]++;
         return dheap != heap;
     }
 
@@ -8580,8 +8587,11 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
             if (gc_is_moveable_obj(objspace, vp)) {
                 if (!gc_compact_move(objspace, heap, size_pool, vp)) {
                     //the cursors met. bubble up
+                    objspace->rcompactor.gc_compact_move_failed_count_table[BUILTIN_TYPE(vp)]++;
                     return false;
                 }
+            } else {
+                objspace->rcompactor.pinned_count_table[BUILTIN_TYPE(vp)]++;
             }
         }
         p += slot_size;
@@ -10889,6 +10899,9 @@ gc_compact_stats(VALUE self)
     rb_objspace_t *objspace = &rb_objspace;
     VALUE h = rb_hash_new();
     VALUE considered = rb_hash_new();
+    VALUE pinned = rb_hash_new();
+    VALUE gc_compact_move_failed = rb_hash_new();
+    VALUE cursors_met = rb_hash_new();
     VALUE moved = rb_hash_new();
     VALUE moved_up = rb_hash_new();
     VALUE moved_down = rb_hash_new();
@@ -10896,6 +10909,18 @@ gc_compact_stats(VALUE self)
     for (i=0; i<T_MASK; i++) {
         if (objspace->rcompactor.considered_count_table[i]) {
             rb_hash_aset(considered, type_sym(i), SIZET2NUM(objspace->rcompactor.considered_count_table[i]));
+        }
+
+        if (objspace->rcompactor.pinned_count_table[i]) {
+            rb_hash_aset(pinned, type_sym(i), SIZET2NUM(objspace->rcompactor.pinned_count_table[i]));
+        }
+
+        if (objspace->rcompactor.gc_compact_move_failed_count_table[i]) {
+            rb_hash_aset(gc_compact_move_failed, type_sym(i), SIZET2NUM(objspace->rcompactor.gc_compact_move_failed_count_table[i]));
+        }
+
+        if (objspace->rcompactor.cursors_met_count_table[i]) {
+            rb_hash_aset(cursors_met, type_sym(i), SIZET2NUM(objspace->rcompactor.cursors_met_count_table[i]));
         }
 
         if (objspace->rcompactor.moved_count_table[i]) {
@@ -10912,6 +10937,9 @@ gc_compact_stats(VALUE self)
     }
 
     rb_hash_aset(h, ID2SYM(rb_intern("considered")), considered);
+    rb_hash_aset(h, ID2SYM(rb_intern("pinned")), pinned);
+    rb_hash_aset(h, ID2SYM(rb_intern("gc_compact_move_failed")), gc_compact_move_failed);
+    rb_hash_aset(h, ID2SYM(rb_intern("cursors_met")), cursors_met);
     rb_hash_aset(h, ID2SYM(rb_intern("moved")), moved);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_up")), moved_up);
     rb_hash_aset(h, ID2SYM(rb_intern("moved_down")), moved_down);
