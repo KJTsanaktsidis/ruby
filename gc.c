@@ -8583,7 +8583,7 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
 
         if (bitset & 1) {
             if (BUILTIN_TYPE(vp) == T_HASH) {
-                fprintf(stdout, "considering hash %ld\n", NUM2LONG(rb_obj_id(vp)));
+                fprintf(stdout, "considering hash obj id %ld addr 0x%lx slot %d\n", NUM2LONG(rb_obj_id(vp)), vp, slot_size);
             }
             objspace->rcompactor.considered_count_table[BUILTIN_TYPE(vp)]++;
 
