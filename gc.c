@@ -8582,6 +8582,9 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
         GC_ASSERT(vp % sizeof(RVALUE) == 0);
 
         if (bitset & 1) {
+            if (BUILTIN_TYPE(vp) == T_HASH) {
+                fprintf(stderr, "considering hash %ld\n", NUM2LONG(rb_obj_id(vp)));
+            }
             objspace->rcompactor.considered_count_table[BUILTIN_TYPE(vp)]++;
 
             if (gc_is_moveable_obj(objspace, vp)) {
