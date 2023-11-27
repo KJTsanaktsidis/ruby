@@ -430,7 +430,7 @@ class TestGCCompact < Test::Unit::TestCase
     assert_separately(%w[-robjspace], "#{<<~"begin;"}\n#{<<~"end;"}", timeout: 10, signal: :SEGV)
     begin;
       $stdout.sync = true
-      HASH_COUNT = 10
+      HASH_COUNT = 11
 
       $inspect = Object.instance_method(:inspect)
       def print_addr(obj)

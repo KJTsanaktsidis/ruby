@@ -8577,6 +8577,7 @@ gc_compact_plane(rb_objspace_t *objspace, rb_size_pool_t *size_pool, rb_heap_t *
     short slot_bits = slot_size / BASE_SLOT_SIZE;
     GC_ASSERT(slot_bits > 0);
 
+    fprintf(stdout, "compacting plane 0x%lx\n", p);
     do {
         VALUE vp = (VALUE)p;
         GC_ASSERT(vp % sizeof(RVALUE) == 0);
