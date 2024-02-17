@@ -4263,6 +4263,7 @@ rb_objspace_free_objects(rb_objspace_t *objspace)
         uintptr_t pend = p + page->total_slots * stride;
         for (; p < pend; p += stride) {
             VALUE vp = (VALUE)p;
+            void *poisoned = asan_unpoison_object_temporary(vp);
             switch (BUILTIN_TYPE(vp)) {
               case T_NONE:
               case T_SYMBOL:
@@ -4270,6 +4271,9 @@ rb_objspace_free_objects(rb_objspace_t *objspace)
               default:
                 obj_free(objspace, vp);
                 break;
+            }
+            if (poisoned) {
+                asan_poison_object(vp);
             }
         }
     }
