@@ -658,9 +658,14 @@ st_clear(st_table *tab)
 void
 st_free_table(st_table *tab)
 {
-    free(tab->bins);
-    free(tab->entries);
-    free(tab);
+    /* It's possible for tab to be NULL if we're being called as a dfree function
+     * from a st_table wrapped with Data_Wrap_Struct, and then subsequently
+     * null'd out with DATA_WRAPPER(obj) = 0 */
+    if (tab) {
+        free(tab->bins);
+        free(tab->entries);
+        free(tab);
+    }
 }
 
 /* Return byte size of memory allocated for table TAB.  */
