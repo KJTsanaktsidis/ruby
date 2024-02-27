@@ -292,6 +292,70 @@ rb_freeaddrinfo(struct rb_addrinfo *ai)
     xfree(ai);
 }
 
+static VALUE addrinfo_stats_cb = Qnil;
+static VALUE rb_cAddrinfoStats;
+static ID id_call, id_handle_interrupt, id_never;
+
+static bool
+timespec_is_zero(const struct timespec *time0)
+{
+    return time0->tv_nsec == 0 && time0->tv_sec == 0;
+}
+
+static long
+diff_timespec_to_nsecs(const struct timespec *time1, const struct timespec *time0) {
+    if (timespec_is_zero(time1) || timespec_is_zero(time0)) {
+        return 0;
+    }
+    struct timespec diff = {
+        .tv_sec = time1->tv_sec - time0->tv_sec,
+        .tv_nsec = time1->tv_nsec - time0->tv_nsec
+    };
+    if (diff.tv_nsec < 0) {
+        diff.tv_nsec += 1000000000; // nsec/sec
+        diff.tv_sec--;
+    }
+    return diff.tv_sec * 1000000000 + diff.tv_nsec;
+}
+
+struct do_statscb_args {
+    struct timespec start_time;
+    struct timespec end_time;
+    struct timespec getaddrinfo3_start_time;
+    struct timespec getaddrinfo3_end_time;
+    bool interrupted;
+};
+
+static VALUE
+do_statscb_timeout_block(RB_BLOCK_CALL_FUNC_ARGLIST(yielded_arg, callback_arg))
+{
+    struct do_statscb_args *args = (struct do_statscb_args *)callback_arg;
+    VALUE stats = rb_struct_new(rb_cAddrinfoStats,
+        LONG2NUM(diff_timespec_to_nsecs(&args->end_time, &args->start_time)),
+        LONG2NUM(diff_timespec_to_nsecs(&args->getaddrinfo3_end_time, &args->getaddrinfo3_start_time)),
+        LONG2NUM(diff_timespec_to_nsecs(&args->getaddrinfo3_start_time, &args->start_time)),
+        LONG2NUM(diff_timespec_to_nsecs(&args->end_time, &args->getaddrinfo3_end_time)),
+        args->interrupted ? Qtrue : Qfalse
+    );
+    rb_funcall(addrinfo_stats_cb, id_call, 1, stats);
+    return Qnil;
+}
+
+static void
+do_statscb(struct do_statscb_args *args)
+{
+    if (!RB_TEST(addrinfo_stats_cb)) {
+        return;
+    }
+
+    VALUE kwargs = rb_hash_new();
+    rb_hash_aset(kwargs, rb_eException, rb_id2sym(id_never));
+    VALUE argv[1] = { kwargs };
+    rb_block_call_kw(rb_cThread, id_handle_interrupt, 1, argv, do_statscb_timeout_block, (VALUE)args, RB_PASS_KEYWORDS);
+    RB_GC_GUARD(kwargs);
+}
+
+
 #if GETADDRINFO_IMPL == 0
 
 static int
@@ -308,6 +372,7 @@ struct getaddrinfo_arg
     const char *service;
     const struct addrinfo *hints;
     struct addrinfo **res;
+    struct timespec getaddrinfo3_start_time, getaddrinfo3_end_time;
 };
 
 static void *
@@ -315,7 +380,9 @@ nogvl_getaddrinfo(void *arg)
 {
     int ret;
     struct getaddrinfo_arg *ptr = arg;
+    clock_gettime(CLOCK_MONOTONIC, &ptr->getaddrinfo3_start_time);
     ret = getaddrinfo(ptr->node, ptr->service, ptr->hints, ptr->res);
+    clock_gettime(CLOCK_MONOTONIC, &ptr->getaddrinfo3_end_time);
 #ifdef __linux__
     /* On Linux (mainly Ubuntu 13.04) /etc/nsswitch.conf has mdns4 and
      * it cause getaddrinfo to return EAI_SYSTEM/ENOENT. [ruby-list:49420]
@@ -326,16 +393,41 @@ nogvl_getaddrinfo(void *arg)
     return (void *)(VALUE)ret;
 }
 
+static VALUE
+getaddrinfo_do_nogvl_protecting(VALUE argval)
+{
+    struct getaddrinfo_arg *arg = (struct getaddrinfo_arg *)argval;
+    return (VALUE)rb_thread_call_without_gvl(nogvl_getaddrinfo, arg, RUBY_UBF_IO, 0);
+}
+
 static int
 rb_getaddrinfo(const char *hostp, const char *portp, const struct addrinfo *hints, struct addrinfo **ai)
 {
     struct getaddrinfo_arg arg;
+    struct timespec start_time, end_time;
+
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
     MEMZERO(&arg, struct getaddrinfo_arg, 1);
     arg.node = hostp;
     arg.service = portp;
     arg.hints = hints;
     arg.res = ai;
-    return (int)(VALUE)rb_thread_call_without_gvl(nogvl_getaddrinfo, &arg, RUBY_UBF_IO, 0);
+
+    int state;
+    VALUE r = rb_protect(getaddrinfo_do_nogvl_protecting, (VALUE)&arg, &state);
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    struct do_statscb_args statscb_args = {
+        .start_time = start_time,
+        .end_time = end_time,
+        .getaddrinfo3_start_time = arg.getaddrinfo3_start_time,
+        .getaddrinfo3_end_time = arg.getaddrinfo3_end_time,
+        .interrupted = state
+    };
+    do_statscb(&statscb_args);
+    if (state) {
+        rb_jump_tag(state);
+    }
+    return (int)r;
 }
 
 #elif GETADDRINFO_IMPL == 2
@@ -348,6 +440,7 @@ struct getaddrinfo_arg
     int err, refcount, done, cancelled;
     rb_nativethread_lock_t lock;
     rb_nativethread_cond_t cond;
+    struct timespec getaddrinfo3_start_time, getaddrinfo3_end_time;
 };
 
 static struct getaddrinfo_arg *
@@ -390,6 +483,11 @@ allocate_getaddrinfo_arg(const char *hostp, const char *portp, const struct addr
     rb_nativethread_lock_initialize(&arg->lock);
     rb_native_cond_initialize(&arg->cond);
 
+    arg->getaddrinfo3_start_time.tv_sec = 0;
+    arg->getaddrinfo3_start_time.tv_nsec = 0;
+    arg->getaddrinfo3_end_time.tv_sec = 0;
+    arg->getaddrinfo3_end_time.tv_sec = 0;
+
     return arg;
 }
 
@@ -407,7 +505,9 @@ do_getaddrinfo(void *ptr)
     struct getaddrinfo_arg *arg = (struct getaddrinfo_arg *)ptr;
 
     int err;
+    clock_gettime(CLOCK_MONOTONIC, &arg->getaddrinfo3_start_time);
     err = getaddrinfo(arg->node, arg->service, &arg->hints, &arg->ai);
+    clock_gettime(CLOCK_MONOTONIC, &arg->getaddrinfo3_end_time);
 #ifdef __linux__
     /* On Linux (mainly Ubuntu 13.04) /etc/nsswitch.conf has mdns4 and
      * it cause getaddrinfo to return EAI_SYSTEM/ENOENT. [ruby-list:49420]
@@ -474,13 +574,22 @@ do_pthread_create(pthread_t *th, const pthread_attr_t *attr, void *(*start_routi
     return ret;
 }
 
+static VALUE
+protected_rb_thread_check_ints(VALUE arg)
+{
+    rb_thread_check_ints();
+    return Qnil;
+}
+
 static int
 rb_getaddrinfo(const char *hostp, const char *portp, const struct addrinfo *hints, struct addrinfo **ai)
 {
     int retry;
     struct getaddrinfo_arg *arg;
     int err;
+    struct timespec start_time, end_time;
 
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
 start:
     retry = 0;
 
@@ -514,6 +623,7 @@ start:
     rb_thread_call_without_gvl2(wait_getaddrinfo, arg, cancel_getaddrinfo, arg);
 
     int need_free = 0;
+    struct do_statscb_args statscb_args;
     rb_nativethread_lock_lock(&arg->lock);
     {
         if (arg->done) {
@@ -529,6 +639,15 @@ start:
             arg->cancelled = 1; // to make do_getaddrinfo call freeaddrinfo
             retry = 1;
         }
+
+        clock_gettime(CLOCK_MONOTONIC, &end_time);
+        statscb_args.start_time = start_time;
+        statscb_args.end_time = end_time;
+        statscb_args.getaddrinfo3_start_time = arg->getaddrinfo3_start_time;
+        statscb_args.getaddrinfo3_end_time =
+            timespec_is_zero(&arg->getaddrinfo3_end_time) ? end_time : arg->getaddrinfo3_end_time;
+        statscb_args.interrupted = arg->cancelled;
+
         if (--arg->refcount == 0) need_free = 1;
     }
     rb_nativethread_lock_unlock(&arg->lock);
@@ -537,7 +656,12 @@ start:
 
     // If the current thread is interrupted by asynchronous exception, the following raises the exception.
     // But if the current thread is interrupted by timer thread, the following returns; we need to manually retry.
-    rb_thread_check_ints();
+    int state;
+    rb_protect(protected_rb_thread_check_ints, 0, &state);
+    if ((state || !retry)) {
+        do_statscb(&statscb_args);
+    }
+    if (state) rb_jump_tag(state);
     if (retry) goto start;
 
     return err;
@@ -3024,6 +3148,20 @@ rsock_io_socket_addrinfo(VALUE io, struct sockaddr *addr, socklen_t len)
     UNREACHABLE_RETURN(Qnil);
 }
 
+
+static VALUE
+addrinfo_s_stats_cb_set(VALUE self, VALUE cb)
+{
+    addrinfo_stats_cb = cb;
+    return Qnil;
+}
+
+static VALUE
+addrinfo_s_stats_cb(VALUE self)
+{
+    return addrinfo_stats_cb;
+}
+
 /*
  * Addrinfo class
  */
@@ -3048,6 +3186,16 @@ rsock_init_addrinfo(void)
 #ifdef HAVE_TYPE_STRUCT_SOCKADDR_UN
     rb_define_singleton_method(rb_cAddrinfo, "unix", addrinfo_s_unix, -1);
 #endif
+
+    id_call = rb_intern("call");
+    id_handle_interrupt = rb_intern("handle_interrupt");
+    id_never = rb_intern("never");
+    rb_cAddrinfoStats = rb_struct_define_under(rb_cAddrinfo, "Stats",
+        "time", "getaddrinfo3_time", "start_delay", "finish_delay", "interrupted", NULL);
+    rb_define_singleton_method(rb_cAddrinfo, "stats_cb=", addrinfo_s_stats_cb_set, 1);
+    rb_define_singleton_method(rb_cAddrinfo, "stats_cb", addrinfo_s_stats_cb, 0);
+    rb_global_variable(&addrinfo_stats_cb);
+    rb_global_variable(&rb_cAddrinfoStats);
 
     rb_define_method(rb_cAddrinfo, "afamily", addrinfo_afamily, 0);
     rb_define_method(rb_cAddrinfo, "pfamily", addrinfo_pfamily, 0);
