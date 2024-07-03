@@ -1060,6 +1060,22 @@ AS_CASE(["$target_cpu"], [aarch64], [
     ])
 ])
 
+AS_CASE(["$target_cpu"], [x64|x86_64], [
+    AC_CACHE_CHECK([whether __CET__ is defined],
+        rb_cv_x86_64_cf_protection_enabled,
+        AC_COMPILE_IFELSE(
+            [AC_LANG_PROGRAM([[
+                @%:@ifndef __CET__
+                @%:@error "__CET__ not defined"
+                @%:@endif
+            ]])],
+        [rb_cv_x86_64_cf_protection_enabled=yes],
+        [rb_cv_x86_64_cf_protection_enabled=no])
+    )
+    AS_IF([test "$rb_cv_x86_64_cf_protection_enabled" = yes],
+          AC_DEFINE(RUBY_X86_64_CF_PROTECTION_ENABLED, 1))
+])
+
 AC_CACHE_CHECK([whether compiler has statement and declarations in expressions],
   rb_cv_have_stmt_and_decl_in_expr,
   [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[]],[[ __extension__ ({ int a = 0; a; }); ]])],
