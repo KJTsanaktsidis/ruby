@@ -19,6 +19,7 @@ require_relative '../envutil'
 require_relative '../colorize'
 require_relative '../leakchecker'
 require_relative '../test/unit/testcase'
+require_relative '../junit_xml_output'
 require 'optparse'
 
 # See Test::Unit
@@ -1676,9 +1677,10 @@ module Test
           puts if @verbose
           $stdout.flush
 
-          leakchecker.check("#{inst.class}\##{inst.__name__}")
 
           _end_method(inst)
+
+          leakchecker.check("#{inst.class}\##{inst.__name__}")
 
           inst._assertions
         }
@@ -1791,6 +1793,7 @@ module Test
       prepend Test::Unit::TimeoutOption
       prepend Test::Unit::RunCount
       prepend Test::Unit::LaunchableOption::Nothing
+      prepend JUnitXMLOutput
 
       ##
       # Begins the full test run. Delegates to +runner+'s #_run method.
